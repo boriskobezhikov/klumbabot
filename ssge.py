@@ -139,17 +139,31 @@ async def fetch_page(http: httpx.AsyncClient, url: str) -> list[Listing]:
 
 
 async def fetch_listings(pages: int, city_id: int, rooms: str) -> list[Listing]:
-    """Обходит первые `pages` страниц выдачи, отсортированной по свежести."""
+    """
+    Обходит первые `pages` страниц выдачи, отсортированной по свежести.
+
+    По каждому числу комнат ходим ОТДЕЛЬНЫМ запросом. Сайт принимает и
+    `rooms=1,2`, но серверный рендер такой фильтр молча игнорирует и отдаёт
+    вообще всё подряд (мультивыбор у них доезжает только клиентским
+    дозапросом, а мы читаем именно серверный HTML). Одиночное значение
+    фильтруется корректно, поэтому объединяем результаты сами.
+    """
+    values = [r.strip() for r in rooms.split(",") if r.strip()] or ["1"]
+
     out: list[Listing] = []
     seen_ids: set[int] = set()
+    first = True
 
     async with httpx.AsyncClient(timeout=30) as http:
-        for page in range(1, pages + 1):
-            for listing in await fetch_page(http, build_url(page, city_id, rooms)):
-                if listing.id not in seen_ids:
-                    seen_ids.add(listing.id)
-                    out.append(listing)
-            if page < pages:
-                await asyncio.sleep(1)  # не долбим сайт очередью запросов
+        for rooms_value in values:
+            for page in range(1, pages + 1):
+                if not first:
+                    await asyncio.sleep(1)  # не долбим сайт очередью запросов
+                first = False
+                url = build_url(page, city_id, rooms_value)
+                for listing in await fetch_page(http, url):
+                    if listing.id not in seen_ids:
+                        seen_ids.add(listing.id)
+                        out.append(listing)
 
     return out
