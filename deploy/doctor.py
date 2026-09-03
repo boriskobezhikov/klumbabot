@@ -150,6 +150,22 @@ try:
         l = ls[0]
         print(f"{OK} пример: {l.price_usd}$ · спален {l.bedrooms} · {l.location()}")
         print(f"        {l.url}")
+
+        # Удобства (балкон, мебель) живут только на детальной странице. Если
+        # догрузка не работает, Claude судит по одному описанию — и отсеивает
+        # квартиры «потому что про балкон не написано».
+        import httpx
+
+        async def _detail():
+            async with httpx.AsyncClient(timeout=30) as http:
+                return await ssge.fetch_details(http, l)
+
+        if asyncio.run(_detail()):
+            print(f"{OK} карточка догружена: этаж {l.floor or '?'}, {l.condition or '?'}")
+            print(f"{OK} удобства: {', '.join(l.features) or 'ни одного не отмечено'}")
+        else:
+            print(f"{WARN} карточку догрузить не удалось — Claude увидит только описание,")
+            print("       и может отсеивать квартиры за неупомянутый балкон/мебель")
     else:
         print(f"{WARN} страница пуста — возможно, изменилась структура сайта")
 except Exception as e:  # noqa: BLE001

@@ -306,7 +306,9 @@ async def handler(event) -> None:
 # описания на ss.ge грузинские. Дешёвый отсев здесь по цене: сайт отдаёт её
 # сразу в долларах. Порог — самый щедрый бюджет среди активных подписчиков.
 # ---------------------------------------------------------------------------
-async def _handle_ssge_listing(listing: ssge.Listing) -> None:
+async def _handle_ssge_listing(
+    listing: ssge.Listing, http: httpx.AsyncClient | None = None
+) -> None:
     ceiling = max_active_budget()
     if ceiling and listing.price_usd and listing.price_usd > ceiling:
         state.stats.bump("ssge_price_cut")
@@ -320,6 +322,16 @@ async def _handle_ssge_listing(listing: ssge.Listing) -> None:
         "ss.ge candidate #%s: %s$ %sм² %s",
         listing.id, listing.price_usd, listing.area_m2, listing.location(),
     )
+
+    # Догружаем карточку только для тех, кто прошёл по цене: в выдаче поиска
+    # нет ни удобств, ни этажа, ни русского описания — а именно про них люди и
+    # пишут в пожеланиях («нужен балкон», «с мебелью»).
+    if http is not None and await ssge.fetch_details(http, listing):
+        state.stats.bump("ssge_detail")
+        log.info(
+            "ss.ge #%s: удобства — %s",
+            listing.id, ", ".join(listing.features) or "ни одного не отмечено",
+        )
 
     facts = await extract(listing.as_prompt())
     if not facts:
@@ -391,8 +403,11 @@ async def poll_ssge() -> None:
             )
         else:
             log.info("ss.ge: получено %s, новых %s", len(listings), len(fresh))
-            for listing in fresh:
-                await _handle_ssge_listing(listing)
+            # Один клиент на весь проход: карточек за раз бывает много, а
+            # каждое новое соединение — лишнее TLS-рукопожатие к ss.ge.
+            async with httpx.AsyncClient(timeout=30) as http:
+                for listing in fresh:
+                    await _handle_ssge_listing(listing, http)
 
         stats_mod.save(config.CONFIG_PATH, state.stats)
         await asyncio.sleep(int(s["poll_minutes"]) * 60)
