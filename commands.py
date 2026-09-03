@@ -369,7 +369,7 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
         if not sub.is_owner:
             await event.answer("Только владелец.", alert=True)
             return
-        await event.edit(stats_mod.render(state.stats), buttons=kb.stats_menu())
+        await event.edit(stats_mod.render(state.stats, state.last_claude_error), buttons=kb.stats_menu())
     elif screen == "last":
         if not sub.is_owner:
             await event.answer("Только владелец.", alert=True)
@@ -553,6 +553,13 @@ def _last_text(state: config.State) -> str:
     """Последние разборы и кому они ушли — ответ на «почему мне ничего не пришло»."""
     entries = state.recent_verdicts
     if not entries:
+        if state.last_claude_error:
+            return (
+                "Пока ни одного разбора, потому что Claude отвечает ошибкой:\n\n"
+                f"{state.last_claude_error[:300]}\n\n"
+                "Объявления собираются, но разобрать их не получается. "
+                "Проверь ANTHROPIC_API_KEY и баланс на platform.claude.com."
+            )
         return (
             "Пока ни одного разбора.\n\n"
             "Объявление попадает сюда, только когда дошло до Claude: прошло "
@@ -587,7 +594,7 @@ async def _cmd_last(event, user_client, state, sub, args) -> None:
 async def _cmd_stats(event, user_client, state, sub, args) -> None:
     if not sub.is_owner:
         return
-    await event.respond(stats_mod.render(state.stats), buttons=kb.stats_menu())
+    await event.respond(stats_mod.render(state.stats, state.last_claude_error), buttons=kb.stats_menu())
 
 
 _HANDLERS = {

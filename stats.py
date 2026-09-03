@@ -34,6 +34,7 @@ COUNTERS = (
     ("dup", "дублей отброшено"),
     ("claude_extract", "разборов в Claude"),
     ("claude_match", "личных проверок"),
+    ("claude_failed", "ОШИБОК Claude"),
     ("no_match", "никому не подошло"),
     ("notified", "уведомлений разослано"),
 )
@@ -122,9 +123,15 @@ def save(config_path: Path, st: Stats) -> None:
 
 
 # ---------------------------------------------------------------------------
-def render(st: Stats) -> str:
+def render(st: Stats, last_error: str | None = None) -> str:
     """Сводка для владельца."""
     lines = ["📈 Статистика", ""]
+    if last_error:
+        lines += [
+            "⚠️ Claude отвечает ошибкой — объявления не разбираются:",
+            f"   {last_error[:200]}",
+            "",
+        ]
     lines.append(f"{'':24s}{'час':>6s}{'сутки':>8s}{'всего':>9s}")
     for name, label in COUNTERS:
         h, d, t = st.count(name, HOUR), st.count(name, DAY), st.total(name)

@@ -165,6 +165,7 @@ class State:
     ssge_last_new: int = 0
     ssge_seen_count: int = 0
     ssge_last_error: str | None = None
+    last_claude_error: str | None = None
 
     # user_id -> чего ждём от следующего сообщения (сейчас только "description")
     awaiting: dict[int, str] = field(default_factory=dict)

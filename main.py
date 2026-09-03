@@ -81,7 +81,6 @@ async def extract(text: str) -> dict | None:
     now = time.time()
     state.api_calls = [t for t in state.api_calls if now - t < 86400]
     state.api_calls.append(now)
-    state.stats.bump("claude_extract")
 
     try:
         resp = await anthropic_client.messages.create(
@@ -94,9 +93,25 @@ async def extract(text: str) -> dict | None:
         raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
         facts = json.loads(raw)
     except Exception as e:  # noqa: BLE001
-        log.warning("extract() failed: %s", e)
+        # Считаем отказы отдельно от успехов. Раньше счётчик рос до запроса, и
+        # сплошные отказы выглядели как успешная работа: «разборы есть, а
+        # уведомлений нет» — без единой подсказки, что виноват API.
+        state.stats.bump("claude_failed")
+        first = state.last_claude_error is None
+        state.last_claude_error = f"{type(e).__name__}: {e}"
+        log.warning("extract() failed: %s", state.last_claude_error)
+        # Один раз на серию: молчащий бот, который «вроде работает», — худшее,
+        # что тут может быть. Спам при этом не нужен, поэтому только на переходе.
+        if first:
+            await notify_owner(
+                "⚠️ Claude отвечает ошибкой, объявления не разбираются:\n\n"
+                f"{state.last_claude_error[:300]}\n\n"
+                "Сбор продолжается. Проверь ключ и баланс — /stats покажет счётчик."
+            )
         return None
 
+    state.stats.bump("claude_extract")
+    state.last_claude_error = None
     facts["district"] = districts.normalize(facts.get("district"))
     return facts
 
@@ -112,7 +127,6 @@ async def personal_check(sub, listing_text: str) -> tuple[bool, str]:
     после того, как объявление прошло структурные фильтры этого человека.
     У кого пожелания не заданы, сюда вообще не попадают.
     """
-    state.stats.bump("claude_match")
     try:
         resp = await anthropic_client.messages.create(
             model=CLAUDE_MODEL,
@@ -126,9 +140,12 @@ async def personal_check(sub, listing_text: str) -> tuple[bool, str]:
     except Exception as e:  # noqa: BLE001
         # Сбой проверки не должен глотать объявление, которое уже подошло
         # по всем измеримым признакам — лучше прислать с оговоркой.
-        log.warning("personal_check() failed: %s", e)
+        state.stats.bump("claude_failed")
+        state.last_claude_error = f"{type(e).__name__}: {e}"
+        log.warning("personal_check() failed: %s", state.last_claude_error)
         return True, "пожелания проверить не удалось"
 
+    state.stats.bump("claude_match")
     return bool(verdict.get("match")), str(verdict.get("reason") or "")
 
 
