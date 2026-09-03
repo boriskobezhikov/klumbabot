@@ -1,0 +1,10 @@
+.env
+config.json
+
+# Файлы сессии Telethon = полный доступ к аккаунту, коммитить нельзя
+*.session
+*.session-journal
+
+venv/
+__pycache__/
+*.pyc

@@ -1,26 +1,33 @@
 """
 Klumba rental-listing monitor.
 
-Listens in real time to a Telegram group (as your own account, via Telethon),
-pre-filters new messages with cheap keyword rules, asks Claude (Haiku) to
-judge the ones that look like real listings against your criteria, and pushes
-a Telegram notification via a bot for every match.
+Слушает в реальном времени несколько Telegram-чатов (от вашего аккаунта, через
+Telethon), дёшево отсеивает нерелевантное regex-предфильтром, прогоняет
+кандидатов через Claude (Haiku) и присылает уведомление notify-ботом на каждое
+совпадение.
 
-Run once interactively the first time (to log in with your phone number and
-the code Telegram sends you) — after that it can run unattended as a service.
-See README.md for full setup.
+Тот же notify-бот принимает команды управления фильтрами — /help покажет
+список. Настройки живут в config.json и переживают перезапуск.
+
+Первый запуск делается интерактивно (Telethon спросит номер и код), дальше
+процесс работает как сервис. Подробности в README.md.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import time
 
-import httpx
-from anthropic import Anthropic
+from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+
+import chats as chats_mod
+import commands
+import config
 
 load_dotenv()
 
@@ -28,57 +35,47 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("klumba-monitor")
 
 # ---------------------------------------------------------------------------
-# Config (all from .env — see .env.example)
+# Секреты (из .env). Всё, что относится к критериям поиска, — в config.json.
 # ---------------------------------------------------------------------------
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 SESSION_NAME = os.environ.get("TG_SESSION_NAME", "klumba_userbot")
 
-GROUP = os.environ.get("TG_GROUP", "kkklumba")  # group username, no @
-
 BOT_TOKEN = os.environ["NOTIFY_BOT_TOKEN"]
-NOTIFY_CHAT_ID = os.environ["NOTIFY_CHAT_ID"]
+NOTIFY_CHAT_ID = int(os.environ["NOTIFY_CHAT_ID"])
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
-BUDGET_USD = int(os.environ.get("BUDGET_USD", "700"))
-GEL_PER_USD = float(os.environ.get("GEL_PER_USD", "2.6"))
+DEDUP_TTL = 24 * 3600  # одно и то же объявление часто кросс-постят в разные чаты
 
-# ---------------------------------------------------------------------------
-# Cheap pre-filter so we don't burn API calls on chit-chat / "ищу квартиру" posts
-# ---------------------------------------------------------------------------
-LISTING_HINT = re.compile(r"сда(ю|ётся|ется|м)\b|в\s*аренду", re.IGNORECASE)
-BEDROOM_HINT = re.compile(r"спальн|студ|1[\s\-]*комнат", re.IGNORECASE)
-SEEKING_HINT = re.compile(r"\bищу\b|\bсниму\b|\bнужна?\s+квартир", re.IGNORECASE)
+anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY)
+# Userbot читает чаты, bot — шлёт уведомления и принимает команды.
+user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+bot = TelegramClient(f"{SESSION_NAME}_bot", API_ID, API_HASH)
+bot.parse_mode = None  # в тексты попадают regex — markdown бы их поломал
 
-SYSTEM_PROMPT = f"""Ты фильтруешь объявления об аренде квартир из тбилисского Telegram-чата "Клумба".
-
-Пользователь ищет: 1-комнатную/1-спальную квартиру в ДОЛГОСРОЧНУЮ аренду (от нескольких месяцев,
-не посуточно и не саблет на пару недель), итоговая стоимость в месяц (аренда + коммуналка,
-если коммуналка указана явно) не больше ${BUDGET_USD}.
-
-Тебе присылают текст ОДНОГО сообщения из чата. Верни СТРОГО json без markdown-обёртки, вида:
-{{"match": true/false, "reason": "коротко по-русски почему да/нет", "price_usd": число_или_null,
-"area_m2": число_или_null, "district": "строка_или_null"}}
-
-Правила:
-- Если коммуналка указана в лари — переведи в доллары (~{GEL_PER_USD} GEL = 1 USD) и прибавь к аренде
-  для итоговой суммы, на основании которой сравниваешь с бюджетом.
-- Если это сообщение о ПОИСКЕ жилья ("ищу", "сниму"), а не о СДАЧЕ — match всегда false.
-- Если это посуточная/недельная аренда или саблет на пару недель без явного "от N месяцев" — match false.
-- Если это не квартира вовсе (комната в общаге, коммерческое помещение и т.п. без явного "1 спальня") — match false.
-- Будь придирчив: лучше пропустить сомнительное объявление, чем прислать ложный матч."""
+state = config.State(cfg=config.load())
 
 
-def classify(text: str) -> dict | None:
+async def notify(text: str) -> None:
     try:
-        resp = anthropic_client.messages.create(
+        await bot.send_message(NOTIFY_CHAT_ID, text, link_preview=False)
+    except Exception as e:  # noqa: BLE001
+        log.warning("notify() failed: %s", e)
+
+
+async def classify(text: str) -> dict | None:
+    now = time.time()
+    state.api_calls = [t for t in state.api_calls if now - t < 86400]
+    state.api_calls.append(now)
+
+    try:
+        resp = await anthropic_client.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=250,
-            system=SYSTEM_PROMPT,
+            system=config.build_system_prompt(state.cfg),
             messages=[{"role": "user", "content": text[:2000]}],
         )
         raw = resp.content[0].text.strip()
@@ -89,63 +86,136 @@ def classify(text: str) -> dict | None:
         return None
 
 
-async def notify(text: str) -> None:
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    async with httpx.AsyncClient(timeout=15) as http_client:
-        r = await http_client.post(
-            url,
-            json={
-                "chat_id": NOTIFY_CHAT_ID,
-                "text": text,
-                "disable_web_page_preview": True,
-            },
-        )
-        if r.status_code != 200:
-            log.warning("notify() failed: %s %s", r.status_code, r.text)
+# ---------------------------------------------------------------------------
+# Дедупликация по тексту
+# ---------------------------------------------------------------------------
+_WHITESPACE = re.compile(r"\s+")
 
 
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+def _dedup_key(text: str) -> str:
+    return hashlib.sha256(
+        _WHITESPACE.sub(" ", text.strip().casefold()).encode()
+    ).hexdigest()
 
 
-@client.on(events.NewMessage(chats=GROUP))
+def _seen_recently(key: str) -> bool:
+    """Помечает текст как виденный и говорит, встречался ли он за сутки."""
+    now = time.time()
+    for k, ts in list(state.seen.items()):
+        if now - ts > DEDUP_TTL:
+            del state.seen[k]
+    if key in state.seen:
+        return True
+    state.seen[key] = now
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Мониторинг. Список чатов не зашит в декоратор, чтобы /chats add работал без
+# перезапуска — сверяем chat_id с конфигом уже внутри обработчика.
+# ---------------------------------------------------------------------------
+@user_client.on(events.NewMessage)
 async def handler(event) -> None:
+    cfg = state.cfg
+    chat = cfg.chat_by_peer_id(event.chat_id)
+    if chat is None:
+        return
+
     text = event.raw_text or ""
     if not text:
         return
-    if SEEKING_HINT.search(text) and not LISTING_HINT.search(text):
-        return
-    if not LISTING_HINT.search(text):
-        return
-    if not BEDROOM_HINT.search(text):
+
+    if cfg.prefilter["enabled"]:
+        try:
+            listing, bedroom, seeking = cfg.compiled_prefilter()
+        except re.error as e:
+            log.warning("битый regex в конфиге, предфильтр пропущен: %s", e)
+        else:
+            if seeking.search(text) and not listing.search(text):
+                return
+            if not listing.search(text):
+                return
+            if not bedroom.search(text):
+                return
+
+    if _seen_recently(_dedup_key(text)):
+        log.info("dup #%s в %s — пропуск", event.id, chat.label())
         return
 
-    log.info("candidate #%s: %.70s", event.id, text.replace("\n", " "))
+    log.info(
+        "candidate #%s [%s]: %.70s", event.id, chat.label(), text.replace("\n", " ")
+    )
 
-    verdict = classify(text)
+    verdict = await classify(text)
     if not verdict:
         return
 
     if verdict.get("match"):
-        link = f"https://t.me/{GROUP}/{event.id}"
         msg = (
-            "🔥 Новое подходящее объявление в Клумбе\n\n"
+            "🔥 Новое подходящее объявление\n\n"
+            f"Чат: {chat.label()}\n"
             f"{verdict.get('reason', '')}\n"
             f"Цена: {verdict.get('price_usd', '?')}$ | "
             f"Площадь: {verdict.get('area_m2', '?')} м² | "
-            f"Район: {verdict.get('district', '?')}\n\n"
-            f"{link}"
+            f"Район: {verdict.get('district', '?')}"
         )
+        link = chats_mod.message_link(chat, event.id)
+        if link:
+            msg += f"\n\n{link}"
         await notify(msg)
         log.info("-> notified for #%s", event.id)
     else:
         log.info("-> skip #%s (%s)", event.id, verdict.get("reason", ""))
 
 
+async def resolve_pending() -> list[str]:
+    """Доставляет peer_id чатам, добавленным без него (в т.ч. из старого .env)."""
+    problems: list[str] = []
+    changed = False
+
+    for chat in state.cfg.chats:
+        if chat.peer_id is not None:
+            continue
+        try:
+            resolved = await chats_mod.resolve(user_client, chat.ref)
+        except chats_mod.ResolveError as e:
+            problems.append(str(e))
+            continue
+        chat.peer_id = resolved.peer_id
+        chat.title = resolved.title
+        chat.username = resolved.username
+        changed = True
+
+    if changed:
+        await config.save(state.cfg)
+    return problems
+
+
 async def main() -> None:
-    await client.start()
-    log.info("Logged in. Listening to '%s' for new listings...", GROUP)
-    await notify("✅ Мониторинг Клумбы запущен.")
-    await client.run_until_disconnected()
+    await bot.start(bot_token=BOT_TOKEN)
+    await user_client.start()
+
+    problems = await resolve_pending()
+    commands.register(bot, user_client, state, NOTIFY_CHAT_ID)
+
+    active = [c for c in state.cfg.chats if c.peer_id is not None]
+    listed = ", ".join(c.label() for c in active) or "ни одного"
+    log.info("Запущен. Слушаю: %s", listed)
+
+    msg = (
+        "✅ Мониторинг запущен.\n"
+        f"Чаты: {listed}\n"
+        f"Бюджет: {state.cfg.budget_usd}$\n\n"
+        "/help — список команд"
+    )
+    if problems:
+        msg += "\n\n⚠️ Не удалось подключить:\n" + "\n".join(f"• {p}" for p in problems)
+    await notify(msg)
+
+    await asyncio.gather(
+        user_client.run_until_disconnected(),
+        bot.run_until_disconnected(),
+    )
 
 
 if __name__ == "__main__":
