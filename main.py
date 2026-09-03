@@ -1,13 +1,14 @@
 """
-Klumba rental-listing monitor.
+Klumba rental monitor.
 
-Слушает в реальном времени несколько Telegram-чатов (от вашего аккаунта, через
-Telethon), дёшево отсеивает нерелевантное regex-предфильтром, прогоняет
-кандидатов через Claude (Haiku) и присылает уведомление notify-ботом на каждое
-совпадение.
+Следит за объявлениями об аренде в Тбилиси из двух источников — Telegram-чатов
+(живая подписка через Telethon) и сайта ss.ge (опрос по таймеру) — и рассылает
+подходящие подписчикам.
 
-Тот же notify-бот принимает команды управления фильтрами — /help покажет
-список. Настройки живут в config.json и переживают перезапуск.
+Экономика построена вокруг одного решения: Claude вызывается ОДИН раз на
+объявление и только извлекает факты. Кому это объявление подходит, решает
+обычная арифметика в users.matches(). Поэтому расходы на API не зависят от
+числа подписчиков — что один человек, что пятьдесят.
 
 Первый запуск делается интерактивно (Telethon спросит номер и код), дальше
 процесс работает как сервис. Подробности в README.md.
@@ -31,46 +32,49 @@ from telethon import TelegramClient, events
 import chats as chats_mod
 import commands
 import config
+import districts
 import ssge
+import users as users_mod
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("klumba-monitor")
 
-# ---------------------------------------------------------------------------
-# Секреты (из .env). Всё, что относится к критериям поиска, — в config.json.
-# ---------------------------------------------------------------------------
 API_ID = int(os.environ["TG_API_ID"])
 API_HASH = os.environ["TG_API_HASH"]
 SESSION_NAME = os.environ.get("TG_SESSION_NAME", "klumba_userbot")
 
 BOT_TOKEN = os.environ["NOTIFY_BOT_TOKEN"]
-NOTIFY_CHAT_ID = int(os.environ["NOTIFY_CHAT_ID"])
+OWNER_ID = int(os.environ["NOTIFY_CHAT_ID"])
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
-DEDUP_TTL = 24 * 3600  # одно и то же объявление часто кросс-постят в разные чаты
+DEDUP_TTL = 24 * 3600
 
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-# Userbot читает чаты, bot — шлёт уведомления и принимает команды.
 user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 bot = TelegramClient(f"{SESSION_NAME}_bot", API_ID, API_HASH)
 bot.parse_mode = None  # в тексты попадают regex — markdown бы их поломал
 
-state = config.State(cfg=config.load())
+state = config.State(cfg=config.load(owner_id=OWNER_ID))
 
 
-async def notify(text: str) -> None:
+async def notify(user_id: int, text: str, buttons=None) -> None:
     try:
-        await bot.send_message(NOTIFY_CHAT_ID, text, link_preview=False)
+        await bot.send_message(user_id, text, buttons=buttons, link_preview=False)
     except Exception as e:  # noqa: BLE001
-        log.warning("notify() failed: %s", e)
+        log.warning("notify(%s) failed: %s", user_id, e)
 
 
-async def classify(text: str) -> dict | None:
+async def notify_owner(text: str) -> None:
+    await notify(OWNER_ID, text)
+
+
+async def extract(text: str) -> dict | None:
+    """Один вызов Claude на объявление: только факты, без решения о матче."""
     now = time.time()
     state.api_calls = [t for t in state.api_calls if now - t < 86400]
     state.api_calls.append(now)
@@ -78,16 +82,56 @@ async def classify(text: str) -> dict | None:
     try:
         resp = await anthropic_client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=250,
-            system=config.build_system_prompt(state.cfg),
-            messages=[{"role": "user", "content": text[:2000]}],
+            max_tokens=400,
+            system=config.build_extraction_prompt(state.cfg),
+            messages=[{"role": "user", "content": text[:2500]}],
         )
         raw = resp.content[0].text.strip()
         raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
-        return json.loads(raw)
+        facts = json.loads(raw)
     except Exception as e:  # noqa: BLE001
-        log.warning("classify() failed: %s", e)
+        log.warning("extract() failed: %s", e)
         return None
+
+    facts["district"] = districts.normalize(facts.get("district"))
+    return facts
+
+
+# ---------------------------------------------------------------------------
+# Раздача подписчикам
+# ---------------------------------------------------------------------------
+async def fan_out(facts: dict, source: str, link: str | None, origin: str) -> int:
+    """Рассылает объявление всем, чьим фильтрам оно отвечает. Возвращает счёт."""
+    sent = 0
+    for sub in state.cfg.active():
+        ok, why = users_mod.matches(sub, facts, source)
+        if not ok:
+            log.debug("  %s: нет — %s", sub.label(), why)
+            continue
+
+        price = facts.get("price_usd")
+        parts = [
+            "🔥 Новое подходящее объявление",
+            "",
+            f"Источник: {origin}",
+            facts.get("summary") or "",
+            f"Цена: {price if price is not None else '?'}$"
+            f" | Спален: {facts.get('bedrooms') or '?'}"
+            f" | Комнат: {facts.get('rooms') or '?'}"
+            f" | {facts.get('area_m2') or '?'} м²"
+            f" | Район: {facts.get('district') or 'не указан'}",
+        ]
+        if link:
+            parts += ["", link]
+        await notify(sub.user_id, "\n".join(parts))
+        sent += 1
+    return sent
+
+
+def max_active_budget() -> int:
+    """Самый щедрый бюджет среди активных — граница дешёвого отсева."""
+    budgets = [s.budget_usd for s in state.cfg.active()]
+    return max(budgets) if budgets else 0
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +147,6 @@ def _dedup_key(text: str) -> str:
 
 
 def _seen_recently(key: str) -> bool:
-    """Помечает текст как виденный и говорит, встречался ли он за сутки."""
     now = time.time()
     for k, ts in list(state.seen.items()):
         if now - ts > DEDUP_TTL:
@@ -115,8 +158,7 @@ def _seen_recently(key: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Мониторинг. Список чатов не зашит в декоратор, чтобы /chats add работал без
-# перезапуска — сверяем chat_id с конфигом уже внутри обработчика.
+# Telegram-чаты
 # ---------------------------------------------------------------------------
 @user_client.on(events.NewMessage)
 async def handler(event) -> None:
@@ -129,11 +171,11 @@ async def handler(event) -> None:
     if not text:
         return
 
-    if cfg.prefilter["enabled"]:
+    if cfg.prefilter_enabled:
         try:
             listing, bedroom, seeking = cfg.compiled_prefilter()
         except re.error as e:
-            log.warning("битый regex в конфиге, предфильтр пропущен: %s", e)
+            log.warning("битый regex предфильтра, пропускаю его: %s", e)
         else:
             if seeking.search(text) and not listing.search(text):
                 return
@@ -146,46 +188,30 @@ async def handler(event) -> None:
         log.info("dup #%s в %s — пропуск", event.id, chat.label())
         return
 
-    log.info(
-        "candidate #%s [%s]: %.70s", event.id, chat.label(), text.replace("\n", " ")
-    )
+    log.info("candidate #%s [%s]: %.70s", event.id, chat.label(), text.replace("\n", " "))
 
-    verdict = await classify(text)
-    if not verdict:
+    facts = await extract(text)
+    if not facts:
         return
 
-    if verdict.get("match"):
-        msg = (
-            "🔥 Новое подходящее объявление\n\n"
-            f"Чат: {chat.label()}\n"
-            f"{verdict.get('reason', '')}\n"
-            f"Цена: {verdict.get('price_usd', '?')}$ | "
-            f"Площадь: {verdict.get('area_m2', '?')} м² | "
-            f"Район: {verdict.get('district', '?')}"
-        )
-        link = chats_mod.message_link(chat, event.id)
-        if link:
-            msg += f"\n\n{link}"
-        await notify(msg)
-        log.info("-> notified for #%s", event.id)
-    else:
-        log.info("-> skip #%s (%s)", event.id, verdict.get("reason", ""))
+    link = chats_mod.message_link(chat, event.id)
+    sent = await fan_out(facts, users_mod.SOURCE_TELEGRAM, link, chat.label())
+    log.info("-> #%s разослано %s подписчикам", event.id, sent)
 
 
 # ---------------------------------------------------------------------------
 # Опрос ss.ge
 #
-# Regex-предфильтр сюда не применяется — он написан под русские сообщения из
-# чата и отсёк бы грузинские описания целиком. Вместо него отсекаем по цене:
-# сайт отдаёт её сразу в долларах, так что это бесплатно и точно.
+# Regex-предфильтр сюда не применяется — он про русские сообщения из чата, а
+# описания на ss.ge грузинские. Дешёвый отсев здесь по цене: сайт отдаёт её
+# сразу в долларах. Порог — самый щедрый бюджет среди активных подписчиков.
 # ---------------------------------------------------------------------------
 async def _handle_ssge_listing(listing: ssge.Listing) -> None:
-    cfg = state.cfg
-
-    if listing.price_usd and listing.price_usd > cfg.budget_usd:
+    ceiling = max_active_budget()
+    if ceiling and listing.price_usd and listing.price_usd > ceiling:
         log.info(
-            "ss.ge #%s: %s$ > бюджета %s$ — пропуск",
-            listing.id, listing.price_usd, cfg.budget_usd,
+            "ss.ge #%s: %s$ дороже самого щедрого бюджета %s$ — пропуск",
+            listing.id, listing.price_usd, ceiling,
         )
         return
 
@@ -194,33 +220,26 @@ async def _handle_ssge_listing(listing: ssge.Listing) -> None:
         listing.id, listing.price_usd, listing.area_m2, listing.location(),
     )
 
-    verdict = await classify(listing.as_prompt())
-    if not verdict:
+    facts = await extract(listing.as_prompt())
+    if not facts:
         return
 
-    if not verdict.get("match"):
-        log.info("-> skip ss.ge #%s (%s)", listing.id, verdict.get("reason", ""))
-        return
+    # Структурные поля сайта точнее, чем вычитанные из текста.
+    if listing.price_usd:
+        facts["price_usd"] = listing.price_usd
+    if listing.area_m2:
+        facts["area_m2"] = listing.area_m2
+    if facts.get("district") is None:
+        facts["district"] = districts.normalize(listing.district)
 
-    price = verdict.get("price_usd") or listing.price_usd or "?"
-    area = verdict.get("area_m2") or listing.area_m2 or "?"
-    district = verdict.get("district") or listing.location()
-    await notify(
-        "🔥 Новое подходящее объявление\n\n"
-        "Источник: ss.ge\n"
-        f"{verdict.get('reason', '')}\n"
-        f"Цена: {price}$ | Площадь: {area} м² | Район: {district}\n\n"
-        f"{listing.url}"
-    )
-    log.info("-> notified for ss.ge #%s", listing.id)
+    sent = await fan_out(facts, users_mod.SOURCE_SSGE, listing.url, "ss.ge")
+    log.info("-> ss.ge #%s разослано %s подписчикам", listing.id, sent)
 
 
 async def poll_ssge() -> None:
     """Опрашивает ss.ge, пока жив процесс. Ошибки сети не должны его ронять."""
     seen_ids = config.load_seen_ids()
     seen = set(seen_ids)
-    # Пустой список = первый запуск. Тогда первый проход только запоминает
-    # текущую выдачу, иначе пользователь получил бы 30 уведомлений разом.
     priming = not seen
     state.ssge_seen_count = len(seen)
 
@@ -234,7 +253,7 @@ async def poll_ssge() -> None:
             listings = await ssge.fetch_listings(
                 pages=int(s["pages"]),
                 city_id=int(s["city_id"]),
-                rooms=str(s["rooms"]),
+                rooms=state.cfg.ssge_rooms(),
             )
             state.ssge_last_error = None
         except (ssge.SsgeError, httpx.HTTPError, asyncio.TimeoutError) as e:
@@ -256,7 +275,7 @@ async def poll_ssge() -> None:
         if priming:
             priming = False
             log.info("ss.ge: запомнил %s объявлений, слежу за новыми", len(listings))
-            await notify(
+            await notify_owner(
                 f"🌐 ss.ge подключён: проиндексировано {len(listings)} объявлений.\n"
                 "Уведомления пойдут только про новые."
             )
@@ -269,7 +288,7 @@ async def poll_ssge() -> None:
 
 
 async def resolve_pending() -> list[str]:
-    """Доставляет peer_id чатам, добавленным без него (в т.ч. из старого .env)."""
+    """Доставляет peer_id чатам, добавленным без него."""
     problems: list[str] = []
     changed = False
 
@@ -296,27 +315,29 @@ async def main() -> None:
     await user_client.start()
 
     problems = await resolve_pending()
-    commands.register(bot, user_client, state, NOTIFY_CHAT_ID)
+    commands.register(bot, user_client, state, OWNER_ID)
 
-    active = [c for c in state.cfg.chats if c.peer_id is not None]
+    cfg = state.cfg
+    active = [c for c in cfg.chats if c.peer_id is not None]
     listed = ", ".join(c.label() for c in active) or "ни одного"
-    ssge_note = (
-        f"каждые {state.cfg.ssge['poll_minutes']} мин"
-        if state.cfg.ssge["enabled"]
-        else "выключен"
+    log.info(
+        "Запущен. Чаты: %s | ss.ge rooms=%s | подписчиков: %s",
+        listed, cfg.ssge_rooms(), len(cfg.active()),
     )
-    log.info("Запущен. Слушаю: %s | ss.ge: %s", listed, ssge_note)
+    log.info("Предфильтр чатов собран из кнопок: %s", cfg.bedroom_regex())
 
     msg = (
         "✅ Мониторинг запущен.\n"
         f"Чаты: {listed}\n"
-        f"ss.ge: {ssge_note}\n"
-        f"Бюджет: {state.cfg.budget_usd}$\n\n"
-        "/help — список команд"
+        f"ss.ge: {'каждые ' + str(cfg.ssge['poll_minutes']) + ' мин' if cfg.ssge['enabled'] else 'выключен'}\n"
+        f"Подписчиков активных: {len(cfg.active())}\n\n"
+        "/menu — настройки"
     )
     if problems:
         msg += "\n\n⚠️ Не удалось подключить:\n" + "\n".join(f"• {p}" for p in problems)
-    await notify(msg)
+    if cfg.pending():
+        msg += f"\n\n⏳ Ждут решения: {len(cfg.pending())} — /users"
+    await notify_owner(msg)
 
     await asyncio.gather(
         user_client.run_until_disconnected(),

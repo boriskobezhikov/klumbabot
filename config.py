@@ -1,12 +1,16 @@
 """
-Runtime-изменяемая конфигурация мониторинга.
+Конфигурация: общие настройки сбора + подписчики с личными фильтрами.
 
-Всё, что можно поменять командой боту (бюджет, курс, чаты, критерии,
-regex-предфильтр), живёт в config.json рядом с этим файлом. Секреты (токены,
-ключи, TG_API_ID) остаются в .env — их менять на лету незачем.
+Что где лежит:
+  .env         — секреты (токены, ключи). Меняются редко, руками.
+  config.json  — всё остальное. Единственный источник правды, правится ботом.
 
-Если config.json ещё нет, он собирается из значений .env при первом запуске,
-поэтому обновление со старой версии не требует ручной миграции.
+Общее (владелец): список чатов, параметры опроса ss.ge, курс лари.
+Личное (каждый): бюджет, спальни, комнаты, районы, источники.
+
+Предфильтр для чатов и параметр rooms для ss.ge здесь НЕ хранятся — они
+выводятся из объединения фильтров подписчиков (см. users.py). Иначе они бы
+разъезжались с кнопками, которые люди нажимают.
 """
 
 from __future__ import annotations
@@ -17,8 +21,12 @@ import json
 import logging
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
+
+import districts
+import users as users_mod
+from users import Subscriber
 
 log = logging.getLogger("klumba-monitor")
 
@@ -26,30 +34,13 @@ CONFIG_PATH = Path(
     os.environ.get("KLUMBA_CONFIG") or Path(__file__).with_name("config.json")
 )
 
-DEFAULT_CRITERIA = (
-    "1-комнатную/1-спальную квартиру в ДОЛГОСРОЧНУЮ аренду "
-    "(от нескольких месяцев, не посуточно и не саблет на пару недель)."
-)
+CONFIG_VERSION = 2
 
-# Дефолты предфильтра — ровно те регулярки, что были захардкожены раньше.
-DEFAULT_PREFILTER = {
-    "enabled": True,
-    "listing": r"сда(ю|ётся|ется|м)\b|в\s*аренду",
-    "bedroom": r"спальн|студ|1[\s\-]*комнат",
-    "seeking": r"\bищу\b|\bсниму\b|\bнужна?\s+квартир",
-}
-
-PREFILTER_FIELDS = ("listing", "bedroom", "seeking")
-
-# Опрос ss.ge. cityIdList=95 — Тбилиси, rooms — число комнат в фильтре сайта.
-# pages=2 (по 16 объявлений на страницу) с запасом покрывает поток новых
-# объявлений за интервал опроса.
 DEFAULT_SSGE = {
     "enabled": True,
     "poll_minutes": 10,
     "pages": 2,
-    "city_id": 95,
-    "rooms": "1",
+    "city_id": 95,  # Тбилиси
 }
 
 
@@ -57,7 +48,7 @@ DEFAULT_SSGE = {
 class ChatRef:
     """Один отслеживаемый чат. peer_id=None означает «ещё не зарезолвлен»."""
 
-    ref: str  # как его ввёл пользователь: @kkklumba, kkklumba или -100123...
+    ref: str
     peer_id: int | None = None
     title: str | None = None
     username: str | None = None
@@ -73,14 +64,45 @@ class ChatRef:
 
 @dataclass
 class Config:
-    budget_usd: int = 700
     gel_per_usd: float = 2.6
-    criteria: str = DEFAULT_CRITERIA
+    prefilter_enabled: bool = True
     chats: list[ChatRef] = field(default_factory=list)
-    prefilter: dict = field(default_factory=lambda: dict(DEFAULT_PREFILTER))
     ssge: dict = field(default_factory=lambda: dict(DEFAULT_SSGE))
+    subscribers: list[Subscriber] = field(default_factory=list)
+    # Текст критериев из однопользовательской версии. Больше не участвует в
+    # фильтрации (её заменили кнопки), но не выбрасываем молча.
+    legacy_criteria: str = ""
 
-    # -- поиск по чатам ----------------------------------------------------
+    # -- подписчики --------------------------------------------------------
+    def user(self, user_id: int) -> Subscriber | None:
+        for s in self.subscribers:
+            if s.user_id == user_id:
+                return s
+        return None
+
+    def owner(self) -> Subscriber | None:
+        for s in self.subscribers:
+            if s.is_owner:
+                return s
+        return None
+
+    def active(self) -> list[Subscriber]:
+        return [s for s in self.subscribers if s.receives]
+
+    def pending(self) -> list[Subscriber]:
+        return [s for s in self.subscribers if s.status == users_mod.STATUS_PENDING]
+
+    # -- производные настройки сбора --------------------------------------
+    def bedroom_regex(self) -> str:
+        return users_mod.build_bedroom_regex(self.subscribers)
+
+    def ssge_rooms(self) -> str:
+        return users_mod.ssge_rooms_param(self.subscribers)
+
+    def compiled_prefilter(self) -> tuple[re.Pattern, re.Pattern, re.Pattern]:
+        return _compile_prefilter(self.bedroom_regex())
+
+    # -- чаты --------------------------------------------------------------
     def chat_by_peer_id(self, peer_id: int) -> ChatRef | None:
         for chat in self.chats:
             if chat.peer_id == peer_id:
@@ -88,7 +110,6 @@ class Config:
         return None
 
     def chat_by_ref(self, ref: str) -> ChatRef | None:
-        """Ищет по тому, как чат записан, по username и по числовому id."""
         needle = ref.strip().lstrip("@").casefold()
         for chat in self.chats:
             candidates = {chat.ref.lstrip("@").casefold()}
@@ -100,50 +121,42 @@ class Config:
                 return chat
         return None
 
-    # -- предфильтр --------------------------------------------------------
-    def compiled_prefilter(self) -> tuple[re.Pattern, re.Pattern, re.Pattern]:
-        return _compile_prefilter(
-            self.prefilter["listing"],
-            self.prefilter["bedroom"],
-            self.prefilter["seeking"],
-        )
-
     # -- сериализация ------------------------------------------------------
     def to_dict(self) -> dict:
         return {
-            "budget_usd": self.budget_usd,
+            "version": CONFIG_VERSION,
             "gel_per_usd": self.gel_per_usd,
-            "criteria": self.criteria,
-            "chats": [asdict(c) for c in self.chats],
-            "prefilter": self.prefilter,
+            "prefilter_enabled": self.prefilter_enabled,
+            "chats": [c.__dict__ for c in self.chats],
             "ssge": self.ssge,
+            "users": [s.to_dict() for s in self.subscribers],
+            "legacy_criteria": self.legacy_criteria,
         }
 
     @classmethod
     def from_dict(cls, raw: dict) -> Config:
-        prefilter = dict(DEFAULT_PREFILTER)
-        prefilter.update(raw.get("prefilter") or {})
         ssge = dict(DEFAULT_SSGE)
         ssge.update(raw.get("ssge") or {})
+        ssge.pop("rooms", None)  # переехало к подписчикам
+
         return cls(
-            budget_usd=int(raw.get("budget_usd", 700)),
             gel_per_usd=float(raw.get("gel_per_usd", 2.6)),
-            criteria=raw.get("criteria") or DEFAULT_CRITERIA,
+            prefilter_enabled=bool(raw.get("prefilter_enabled", True)),
             chats=[ChatRef(**c) for c in raw.get("chats") or []],
-            prefilter=prefilter,
             ssge=ssge,
+            subscribers=[Subscriber.from_dict(u) for u in raw.get("users") or []],
+            legacy_criteria=raw.get("legacy_criteria") or "",
         )
 
 
 @dataclass
 class State:
-    """Общее изменяемое состояние процесса: конфиг + счётчики для /status."""
+    """Общее изменяемое состояние процесса."""
 
     cfg: Config
-    api_calls: list[float] = field(default_factory=list)  # unix-время вызовов Claude
-    seen: dict[str, float] = field(default_factory=dict)  # дедуп: хеш текста -> время
+    api_calls: list[float] = field(default_factory=list)
+    seen: dict[str, float] = field(default_factory=dict)
 
-    # Наблюдаемость опроса ss.ge (для /status)
     ssge_last_poll: float | None = None
     ssge_last_new: int = 0
     ssge_seen_count: int = 0
@@ -151,21 +164,18 @@ class State:
 
 
 @functools.lru_cache(maxsize=8)
-def _compile_prefilter(listing: str, bedroom: str, seeking: str):
+def _compile_prefilter(bedroom: str):
+    """
+    Три регулярки предфильтра. Признак сдачи и признак поиска — фиксированные
+    (они про глагол, а не про планировку), а bedroom собирается из кнопок.
+    """
+    listing = r"сда(ю|ётся|ется|м|дим)\b|в\s*аренду|сниму\s+не|for\s+rent|rent\s+out"
+    seeking = r"\bищу\b|\bсниму\b|\bнужна?\s+квартир|\bразыскива"
     return (
         re.compile(listing, re.IGNORECASE),
         re.compile(bedroom, re.IGNORECASE),
         re.compile(seeking, re.IGNORECASE),
     )
-
-
-def validate_regex(pattern: str) -> str | None:
-    """Возвращает текст ошибки, если regex не компилируется, иначе None."""
-    try:
-        re.compile(pattern, re.IGNORECASE)
-    except re.error as e:
-        return str(e)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -174,28 +184,94 @@ def validate_regex(pattern: str) -> str | None:
 _save_lock = asyncio.Lock()
 
 
-def load() -> Config:
-    """Читает config.json; если его нет — собирает из .env и сразу сохраняет."""
+def load(owner_id: int | None = None) -> Config:
+    """
+    Читает config.json. Если файла нет — создаёт. Если файл старого формата —
+    мигрирует, сохраняя настройки владельца.
+    """
     if CONFIG_PATH.exists():
         with CONFIG_PATH.open(encoding="utf-8") as f:
-            cfg = Config.from_dict(json.load(f))
-        log.info("Конфиг загружен из %s", CONFIG_PATH)
+            raw = json.load(f)
+        cfg = _migrate(raw, owner_id) if raw.get("version") != CONFIG_VERSION else Config.from_dict(raw)
+        if owner_id is not None:
+            _ensure_owner(cfg, owner_id)
+        _write(cfg)
         return cfg
 
-    cfg = Config(
-        budget_usd=int(os.environ.get("BUDGET_USD", "700")),
-        gel_per_usd=float(os.environ.get("GEL_PER_USD", "2.6")),
-    )
-    legacy_group = os.environ.get("TG_GROUP", "kkklumba").strip()
+    cfg = Config(gel_per_usd=float(os.environ.get("GEL_PER_USD", "2.6")))
+    legacy_group = os.environ.get("TG_GROUP", "").strip()
     if legacy_group:
         cfg.chats.append(ChatRef(ref=legacy_group))
+    if owner_id is not None:
+        _ensure_owner(cfg, owner_id)
     _write(cfg)
-    log.info("Конфиг создан из .env: %s", CONFIG_PATH)
+    log.info("Конфиг создан: %s", CONFIG_PATH)
     return cfg
 
 
+def _migrate(raw: dict, owner_id: int | None) -> Config:
+    """Переносит однопользовательский конфиг (v1) в многопользовательский."""
+    log.info("Мигрирую config.json из старого формата в v%s", CONFIG_VERSION)
+
+    ssge = dict(DEFAULT_SSGE)
+    old_ssge = raw.get("ssge") or {}
+    for k in ("enabled", "poll_minutes", "pages", "city_id"):
+        if k in old_ssge:
+            ssge[k] = old_ssge[k]
+
+    cfg = Config(
+        gel_per_usd=float(raw.get("gel_per_usd", 2.6)),
+        prefilter_enabled=bool((raw.get("prefilter") or {}).get("enabled", True)),
+        chats=[ChatRef(**c) for c in raw.get("chats") or []],
+        ssge=ssge,
+        legacy_criteria=raw.get("criteria") or "",
+    )
+
+    # Настройки владельца переезжают в его личный профиль.
+    if owner_id is not None:
+        old_rooms = str(old_ssge.get("rooms") or "1,2")
+        rooms = [int(r) for r in old_rooms.split(",") if r.strip().isdigit()] or [1, 2]
+        cfg.subscribers.append(
+            Subscriber(
+                user_id=owner_id,
+                role=users_mod.ROLE_OWNER,
+                status=users_mod.STATUS_ACTIVE,
+                budget_usd=int(raw.get("budget_usd", 700)),
+                rooms=rooms,
+                bedrooms=[1],
+            )
+        )
+        log.info(
+            "Настройки владельца перенесены: бюджет %s$, комнаты %s",
+            raw.get("budget_usd", 700), old_rooms,
+        )
+    if cfg.legacy_criteria:
+        log.info(
+            "Текстовые критерии сохранены в legacy_criteria, но больше не "
+            "применяются — фильтрация теперь кнопками"
+        )
+    return cfg
+
+
+def _ensure_owner(cfg: Config, owner_id: int) -> None:
+    """Владелец всегда существует и всегда активен."""
+    sub = cfg.user(owner_id)
+    if sub is None:
+        cfg.subscribers.insert(
+            0,
+            Subscriber(
+                user_id=owner_id,
+                role=users_mod.ROLE_OWNER,
+                status=users_mod.STATUS_ACTIVE,
+            ),
+        )
+        log.info("Владелец %s добавлен в подписчики", owner_id)
+        return
+    sub.role = users_mod.ROLE_OWNER
+    sub.status = users_mod.STATUS_ACTIVE
+
+
 def _write(cfg: Config) -> None:
-    """Атомарная запись, чтобы падение на середине не оставило битый файл."""
     tmp = CONFIG_PATH.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(cfg.to_dict(), f, ensure_ascii=False, indent=2)
@@ -208,14 +284,10 @@ async def save(cfg: Config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Просмотренные объявления ss.ge.
-#
-# Дедуп в памяти (State.seen) сбрасывается при перезапуске — для чата это
-# терпимо, а для сайта нет: после рестарта бот разослал бы заново всю первую
-# страницу выдачи. Поэтому id хранятся на диске.
+# Просмотренные объявления ss.ge (переживают перезапуск)
 # ---------------------------------------------------------------------------
 SEEN_PATH = CONFIG_PATH.with_name("ssge_seen.json")
-SEEN_LIMIT = 5000  # id новее — в начале списка; хвост отбрасываем
+SEEN_LIMIT = 5000
 
 
 def load_seen_ids() -> list[int]:
@@ -237,27 +309,42 @@ def save_seen_ids(ids: list[int]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Промпт для Claude — собирается на каждой классификации, поэтому правки
-# критериев/бюджета применяются без перезапуска.
+# Промпт: Claude только ИЗВЛЕКАЕТ факты, решение принимает код.
+#
+# Так вызов один на объявление независимо от числа подписчиков. Никаких
+# «подходит/не подходит» — у каждого свой бюджет и свои районы, и сравнивать
+# их арифметикой дешевле и предсказуемее, чем спрашивать модель.
 # ---------------------------------------------------------------------------
-def build_system_prompt(cfg: Config) -> str:
-    return f"""Ты фильтруешь объявления об аренде квартир в Тбилиси — из Telegram-чатов и с сайта ss.ge.
+def build_extraction_prompt(cfg: Config) -> str:
+    return f"""Ты разбираешь объявления об аренде жилья в Тбилиси — из Telegram-чатов и с сайта ss.ge.
+Твоя задача — ИЗВЛЕЧЬ ФАКТЫ. Не решай, подходит ли объявление кому-то: это делает код.
 
-Пользователь ищет: {cfg.criteria}
+Тебе присылают ОДНО объявление. Описания с ss.ge бывают на грузинском —
+переводить не нужно, просто пойми смысл. Верни СТРОГО json без markdown-обёртки:
 
-Бюджет: итоговая стоимость в месяц (аренда + коммуналка, если коммуналка указана
-явно) не больше ${cfg.budget_usd}.
-
-Тебе присылают ОДНО объявление — сообщение из чата или карточку с сайта.
-Описания с ss.ge бывают на грузинском: переводить не нужно, просто пойми смысл,
-а reason напиши по-русски. Верни СТРОГО json без markdown-обёртки, вида:
-{{"match": true/false, "reason": "коротко по-русски почему да/нет", "price_usd": число_или_null,
-"area_m2": число_или_null, "district": "строка_или_null"}}
+{{"is_rental_offer": true/false,
+  "is_long_term": true/false,
+  "price_usd": число_или_null,
+  "bedrooms": число_или_null,
+  "rooms": число_или_null,
+  "area_m2": число_или_null,
+  "district": "строка_или_null",
+  "summary": "одно предложение по-русски: что сдаётся и за сколько"}}
 
 Правила:
-- Если коммуналка указана в лари — переведи в доллары (~{cfg.gel_per_usd} GEL = 1 USD) и прибавь
-  к аренде для итоговой суммы, на основании которой сравниваешь с бюджетом.
-- Если это сообщение о ПОИСКЕ жилья ("ищу", "сниму"), а не о СДАЧЕ — match всегда false.
-- Если это посуточная/недельная аренда или саблет на пару недель без явного "от N месяцев" — match false.
-- Если объявление не подходит под то, что ищет пользователь — match false.
-- Будь придирчив: лучше пропустить сомнительное объявление, чем прислать ложный матч."""
+- is_rental_offer: true, только если жильё СДАЮТ. Сообщения о поиске жилья
+  («ищу», «сниму»), продажа, коммерческие помещения — false.
+- is_long_term: true для аренды от месяца и дольше. Посуточная, почасовая,
+  посуточная «на неделю», саблет на пару недель — false. Если срок не указан
+  вовсе, считай true: в чатах его часто не пишут.
+- price_usd: итоговая цена за месяц в долларах. Если цена в лари — переведи
+  по курсу ~{cfg.gel_per_usd} GEL за 1 USD. Если коммуналка указана явно —
+  прибавь её. Если цена не указана — null, не выдумывай.
+- bedrooms: число СПАЛЕН. Внимание: в грузинских и русских объявлениях
+  «2-комнатная» обычно означает одну спальню плюс гостиную, «3-комнатная» —
+  две спальни. Студия — 1 спальня.
+- rooms: общее число комнат, как написано в объявлении.
+- district: район Тбилиси строго из списка, максимально близкий по смыслу:
+  {districts.prompt_list()}.
+  Если район не назван или не из списка — null.
+- Не угадывай. Любое поле, которого нет в тексте, — null."""
