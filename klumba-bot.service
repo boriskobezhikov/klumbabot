@@ -1,16 +1,40 @@
 [Unit]
 Description=Klumba rental listing monitor
+Documentation=https://github.com/boriskobezhikov/klumbabot
 After=network-online.target
 Wants=network-online.target
+# Не сдаваться после серии быстрых падений — Telegram может лежать часами
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# Adjust these two paths to where you actually put the project and your venv:
+User=klumba
+Group=klumba
 WorkingDirectory=/opt/klumba-bot
-ExecStart=/opt/klumba-bot/venv/bin/python /opt/klumba-bot/main.py
-Restart=on-failure
+# -u: логи идут в journald сразу, а не когда наполнится буфер
+ExecStart=/opt/klumba-bot/venv/bin/python -u main.py
+Restart=always
 RestartSec=10
-EnvironmentFile=/opt/klumba-bot/.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=klumba-bot
+
+# Изоляция: процессу нужны только свой каталог и сеть. Он держит вашу
+# Telegram-сессию и ключ Claude, поэтому лишние права ему ни к чему.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+# Единственное место, куда можно писать: config.json и файлы сессии
+ReadWritePaths=/opt/klumba-bot
 
 [Install]
 WantedBy=multi-user.target

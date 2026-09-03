@@ -13,6 +13,8 @@ Telethon), дёшево отсеивает нерелевантное regex-пр
 процесс работает как сервис. Подробности в README.md.
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json

@@ -33,16 +33,38 @@ Claude (проверяет цену/спальни/срок аренды по в
 
 ## Установка (на вашем VPS)
 
+Нужен Debian/Ubuntu и Python 3.10+. Три шага.
+
+**1. Склонировать и установить**
+
 ```bash
-sudo apt update && sudo apt install -y python3-venv python3-pip
-mkdir -p /opt/klumba-bot && cd /opt/klumba-bot
-# скопируйте сюда *.py, requirements.txt, .env.example, klumba-bot.service
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-nano .env   # заполните все значения, см. ниже откуда их брать
+git clone git@github.com:boriskobezhikov/klumbabot.git /opt/klumba-bot
+bash /opt/klumba-bot/deploy/install.sh
 ```
+
+`install.sh` ставит пакеты, заводит системного пользователя `klumba`, собирает
+venv, раскладывает права, регистрирует сервис в автозапуске и печатает, что
+делать дальше. Запускать можно сколько угодно раз — существующие `.env`,
+venv и сессию он не трогает.
+
+**2. Заполнить настройки**
+
+```bash
+nano /opt/klumba-bot/.env
+```
+
+Откуда брать значения — в следующем разделе.
+
+**3. Войти в Telegram и запустить**
+
+```bash
+bash /opt/klumba-bot/deploy/login.sh
+systemctl start klumba-bot
+```
+
+Вход разовый: Telethon спросит номер телефона и код (код приходит в само
+приложение Telegram, не по SMS). Когда в логе появится «Запущен. Слушаю: …» —
+вход прошёл, нажмите Ctrl+C и стартуйте сервис.
 
 ### Откуда взять значения для .env
 
@@ -58,35 +80,38 @@ nano .env   # заполните все значения, см. ниже отк�
 - **ANTHROPIC_API_KEY** — https://platform.claude.com, раздел API keys,
   привяжите карту (иначе ключ не будет работать).
 
-### Первый запуск (логин в свой аккаунт)
+### Эксплуатация
 
 ```bash
-python main.py
+systemctl status klumba-bot          # запущен ли
+journalctl -u klumba-bot -f          # логи в реальном времени
+systemctl restart klumba-bot         # перезапустить
+bash /opt/klumba-bot/deploy/update.sh # обновить код из git и перезапустить
 ```
 
-При первом запуске Telethon спросит номер телефона и код из Telegram
-(придёт в само приложение Telegram, не SMS) — введите его прямо в терминале.
-Это разовая операция: она создаст файлы сессии
-(`klumba_userbot.session`, `klumba_userbot_bot.session`), после чего логиниться
-заново не нужно.
-**Никому не отправляйте .session файлы** — они равносильны доступу к
-вашему аккаунту.
+`update.sh` делает `git pull`, доставляет зависимости, обновляет юнит,
+перезапускает сервис и проверяет, что тот действительно поднялся — если нет,
+сразу показывает логи и возвращает ненулевой код.
 
-Если увидите в Telegram сообщение от вашего notify-бота «✅ Мониторинг
-запущен» со списком чатов — всё работает. Остановите (Ctrl+C) и переходите к
-шагу автозапуска ниже.
+Сервис поднимается сам после перезагрузки VPS и перезапускается при падении
+(`Restart=always`, пауза 10 секунд).
 
-### Автозапуск как systemd-сервис
+### Как это устроено на сервере
 
-Чтобы работал 24/7 и поднимался после перезагрузки/падения:
+- Процесс работает под системным пользователем `klumba` без shell — не под
+  root. Он держит вашу Telegram-сессию и ключ Claude, так что лишние права ему
+  ни к чему.
+- Код принадлежит root и пользователю недоступен на запись; писать он может
+  только в сам каталог `/opt/klumba-bot` — туда ложатся `config.json` и файлы
+  сессии.
+- `.env` — режим `640`, root:klumba: посторонние пользователи на машине его не
+  прочитают.
+- Юнит ограничен systemd-песочницей (`ProtectSystem=strict`, `ProtectHome`,
+  `NoNewPrivileges`, `PrivateTmp` и т.п.) — из всей файловой системы на запись
+  доступен только `/opt/klumba-bot`.
 
-```bash
-sudo cp klumba-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now klumba-bot
-sudo systemctl status klumba-bot     # проверить, что запущен
-journalctl -u klumba-bot -f          # смотреть логи в реальном времени
-```
+**Никому не отправляйте `.session` файлы** — они равносильны доступу к вашему
+Telegram-аккаунту. В git они не попадают (`.gitignore`), права на них `600`.
 
 ## Управление из Telegram
 
