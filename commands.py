@@ -42,6 +42,7 @@ OWNER_HELP = """
 /chats rm @username — убрать
 /users — список людей и заявок
 /stats — сколько собрано и во что обошёлся Claude
+/last — последние разборы и почему они кому-то не подошли
 /rate 2.7 — курс GEL за 1 USD"""
 
 
@@ -369,6 +370,11 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
             await event.answer("Только владелец.", alert=True)
             return
         await event.edit(stats_mod.render(state.stats), buttons=kb.stats_menu())
+    elif screen == "last":
+        if not sub.is_owner:
+            await event.answer("Только владелец.", alert=True)
+            return
+        await event.edit(_last_text(state), buttons=kb.stats_menu())
     elif screen == "src":
         await event.edit(
             "🌐 Откуда брать объявления", buttons=kb.sources_menu(sub)
@@ -543,6 +549,41 @@ async def _cmd_chats(event, user_client, state, sub, args) -> None:
     await event.respond("Есть /chats, /chats add <чат>, /chats rm <чат>")
 
 
+def _last_text(state: config.State) -> str:
+    """Последние разборы и кому они ушли — ответ на «почему мне ничего не пришло»."""
+    entries = state.recent_verdicts
+    if not entries:
+        return (
+            "Пока ни одного разбора.\n\n"
+            "Объявление попадает сюда, только когда дошло до Claude: прошло "
+            "предфильтр (чаты) или отсев по цене (ss.ge) и не оказалось дублем."
+        )
+
+    lines = [f"🔍 Последние разборы ({len(entries)})", ""]
+    for e in entries:
+        f = e["facts"]
+        ago = int((time.time() - e["at"]) / 60)
+        lines.append(
+            f"— {e['origin']}, {ago} мин назад\n"
+            f"  {f.get('summary') or '(без описания)'}\n"
+            f"  цена {f.get('price_usd') or '?'}$ · спален {f.get('bedrooms') or '?'}"
+            f" · комнат {f.get('rooms') or '?'} · {f.get('district') or 'район не указан'}"
+            f" · долгосрочно: {'да' if f.get('is_long_term', True) else 'НЕТ'}"
+        )
+        for v in e["verdicts"] or ["(активных подписчиков не было)"]:
+            lines.append(f"  · {v}")
+        if e.get("link"):
+            lines.append(f"  {e['link']}")
+        lines.append("")
+    return "\n".join(lines)[:4000]
+
+
+async def _cmd_last(event, user_client, state, sub, args) -> None:
+    if not sub.is_owner:
+        return
+    await event.respond(_last_text(state))
+
+
 async def _cmd_stats(event, user_client, state, sub, args) -> None:
     if not sub.is_owner:
         return
@@ -552,6 +593,7 @@ async def _cmd_stats(event, user_client, state, sub, args) -> None:
 _HANDLERS = {
     "/menu": _cmd_menu,
     "/stats": _cmd_stats,
+    "/last": _cmd_last,
     "/help": _cmd_help,
     "/status": _cmd_status,
     "/stop": _cmd_stop,

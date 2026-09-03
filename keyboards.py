@@ -226,7 +226,10 @@ def admin_menu(cfg) -> list[list[Button]]:
 # ---------------------------------------------------------------------------
 def stats_menu() -> list[list[Button]]:
     return [
-        [Button.inline("🔄 Обновить", b"m:stats")],
+        [
+            Button.inline("🔄 Обновить", b"m:stats"),
+            Button.inline("🔍 Последние разборы", b"m:last"),
+        ],
         [Button.inline(BACK, b"m:main")],
     ]
 

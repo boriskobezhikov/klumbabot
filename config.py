@@ -168,6 +168,8 @@ class State:
 
     # user_id -> чего ждём от следующего сообщения (сейчас только "description")
     awaiting: dict[int, str] = field(default_factory=dict)
+    # Последние разборы с вердиктом по каждому подписчику — для /last
+    recent_verdicts: list[dict] = field(default_factory=list)
 
 
 @functools.lru_cache(maxsize=8)

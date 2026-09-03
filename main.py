@@ -53,6 +53,7 @@ ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
 DEDUP_TTL = 24 * 3600
+LAST_KEPT = 15  # сколько последних разборов помнить для /last
 
 anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -135,17 +136,22 @@ async def fan_out(facts: dict, source: str, link: str | None, origin: str,
                   listing_text: str = "") -> int:
     """Рассылает объявление всем, чьим фильтрам оно отвечает. Возвращает счёт."""
     sent = 0
+    verdicts: list[str] = []
     for sub in state.cfg.active():
         ok, why = users_mod.matches(sub, facts, source)
         if not ok:
-            log.debug("  %s: нет — %s", sub.label(), why)
+            # Именно INFO, а не DEBUG: «почему мне ничего не пришло» — самый
+            # частый вопрос к боту, и ответ на него должен быть в логах.
+            log.info("  %s: НЕ подходит — %s", sub.label(), why)
+            verdicts.append(f"{sub.name or sub.user_id}: нет — {why}")
             continue
 
         note = ""
         if sub.description and listing_text:
             ok, reason = await personal_check(sub, listing_text)
             if not ok:
-                log.info("  %s: не по пожеланиям — %s", sub.label(), reason)
+                log.info("  %s: НЕ подходит по пожеланиям — %s", sub.label(), reason)
+                verdicts.append(f"{sub.name or sub.user_id}: нет по пожеланиям — {reason}")
                 continue
             note = reason
 
@@ -167,8 +173,25 @@ async def fan_out(facts: dict, source: str, link: str | None, origin: str,
             parts += ["", link]
         await notify(sub.user_id, "\n".join(parts))
         state.stats.bump("notified")
+        verdicts.append(f"{sub.name or sub.user_id}: ОТПРАВЛЕНО")
         sent += 1
+
+    if sent == 0:
+        state.stats.bump("no_match")
+    _remember(facts, origin, link, verdicts)
     return sent
+
+
+def _remember(facts: dict, origin: str, link: str | None, verdicts: list[str]) -> None:
+    """Кольцевой журнал последних разборов — источник ответа для /last."""
+    state.recent_verdicts.insert(0, {
+        "at": time.time(),
+        "origin": origin,
+        "link": link,
+        "facts": facts,
+        "verdicts": verdicts,
+    })
+    del state.recent_verdicts[LAST_KEPT:]
 
 
 def max_active_budget() -> int:
@@ -279,6 +302,10 @@ async def _handle_ssge_listing(listing: ssge.Listing) -> None:
         facts["price_usd"] = listing.price_usd
     if listing.area_m2:
         facts["area_m2"] = listing.area_m2
+    # Число спален сайт отдаёт полем, а не прозой — ему доверия больше, чем
+    # тому, как модель прочитала грузинский заголовок.
+    if listing.bedrooms is not None:
+        facts["bedrooms"] = listing.bedrooms
     if facts.get("district") is None:
         facts["district"] = districts.normalize(listing.district)
 
