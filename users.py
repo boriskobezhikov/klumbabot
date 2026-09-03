@@ -56,6 +56,9 @@ class Subscriber:
     # Пустой список = любой район. Так новый подписчик по умолчанию видит всё.
     district_list: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=lambda: list(SOURCES))
+    # Свободный текст пожеланий. Проверяется отдельным вызовом Claude и только
+    # для объявлений, уже прошедших структурные фильтры — см. main.personal_check.
+    description: str = ""
 
     @property
     def is_owner(self) -> bool:
@@ -73,13 +76,16 @@ class Subscriber:
     def summary(self) -> str:
         d = ", ".join(self.district_list) if self.district_list else "любые"
         src = ", ".join(self.sources) if self.sources else "НЕТ (уведомлений не будет)"
-        return (
+        out = (
             f"Бюджет: до {self.budget_usd}$\n"
             f"Спален: {_nums(self.bedrooms)}\n"
             f"Комнат: {_nums(self.rooms)}\n"
             f"Районы: {d}\n"
             f"Источники: {src}"
         )
+        if self.description:
+            out += f"\nПожелания: {self.description}"
+        return out
 
     def to_dict(self) -> dict:
         return {
@@ -93,6 +99,7 @@ class Subscriber:
             "rooms": self.rooms,
             "district_list": self.district_list,
             "sources": self.sources,
+            "description": self.description,
         }
 
     @classmethod
@@ -108,6 +115,7 @@ class Subscriber:
             rooms=[int(r) for r in raw.get("rooms") or [1, 2]],
             district_list=list(raw.get("district_list") or []),
             sources=list(raw.get("sources") or SOURCES),
+            description=raw.get("description") or "",
         )
 
 

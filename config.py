@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import districts
+import stats as stats_mod
 import users as users_mod
 from users import Subscriber
 
@@ -156,11 +157,17 @@ class State:
     cfg: Config
     api_calls: list[float] = field(default_factory=list)
     seen: dict[str, float] = field(default_factory=dict)
+    # Настоящий объект по умолчанию: счётчики не должны требовать инициализации
+    # снаружи, иначе любой путь до неё падал бы на None.
+    stats: stats_mod.Stats = field(default_factory=stats_mod.Stats)
 
     ssge_last_poll: float | None = None
     ssge_last_new: int = 0
     ssge_seen_count: int = 0
     ssge_last_error: str | None = None
+
+    # user_id -> чего ждём от следующего сообщения (сейчас только "description")
+    awaiting: dict[int, str] = field(default_factory=dict)
 
 
 @functools.lru_cache(maxsize=8)
@@ -348,3 +355,29 @@ def build_extraction_prompt(cfg: Config) -> str:
   {districts.prompt_list()}.
   Если район не назван или не из списка — null.
 - Не угадывай. Любое поле, которого нет в тексте, — null."""
+
+
+# ---------------------------------------------------------------------------
+# Персональная проверка по свободному тексту пожеланий.
+#
+# Второй вызов Claude, и он платный — поэтому делается лениво: только для
+# объявлений, уже прошедших структурные фильтры этого человека, и только если
+# он вообще задал пожелания. Кто описание не заполнил — не платит ничего.
+# ---------------------------------------------------------------------------
+def build_match_prompt(description: str) -> str:
+    return f"""Ты проверяешь, подходит ли объявление об аренде под пожелания конкретного человека.
+
+Его пожелания, дословно:
+\"\"\"{description}\"\"\"
+
+Цена, число комнат и район уже проверены отдельно — их перепроверять не нужно.
+Твоя задача: сверить только то, о чём сказано в пожеланиях выше.
+
+Верни СТРОГО json без markdown-обёртки:
+{{"match": true/false, "reason": "одно короткое предложение по-русски"}}
+
+Правила:
+- Если про требование из пожеланий в объявлении НИЧЕГО не сказано — считай, что
+  оно не нарушено, и ставь true. Молчание не значит отказ.
+- false ставь, только когда объявление ЯВНО противоречит пожеланиям.
+- reason пиши всегда: при true — чем подходит, при false — что именно не так."""

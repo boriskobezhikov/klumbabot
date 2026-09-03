@@ -20,6 +20,7 @@ from telethon import events
 import config
 import districts
 import keyboards as kb
+import stats as stats_mod
 import users as users_mod
 from chats import ResolveError, resolve
 from users import Subscriber
@@ -29,7 +30,8 @@ log = logging.getLogger("klumba-monitor")
 HELP = """Я слежу за объявлениями об аренде в Тбилиси — в Telegram-чатах и на ss.ge —
 и присылаю те, что подходят под твои фильтры.
 
-/menu — настройки кнопками (спальни, комнаты, бюджет, районы, источники)
+/menu — настройки кнопками (спальни, комнаты, бюджет, районы, источники,
+       а также свободные пожелания текстом)
 /status — что сейчас настроено
 /stop — приостановить уведомления, /start — возобновить"""
 
@@ -39,6 +41,7 @@ OWNER_HELP = """
 /chats add @username — добавить чат (или по id для приватного)
 /chats rm @username — убрать
 /users — список людей и заявок
+/stats — сколько собрано и во что обошёлся Claude
 /rate 2.7 — курс GEL за 1 USD"""
 
 
@@ -53,6 +56,24 @@ def register(bot, user_client, state: config.State, owner_id: int) -> None:
     @bot.on(events.NewMessage(incoming=True))
     async def on_message(event) -> None:
         text = (event.raw_text or "").strip()
+        uid_early = event.sender_id
+
+        # Ждём от этого человека текст пожеланий — принимаем его как есть.
+        if state.awaiting.get(uid_early) == "description" and text and not text.startswith("/"):
+            state.awaiting.pop(uid_early, None)
+            sub_early = state.cfg.user(uid_early)
+            if sub_early is not None:
+                sub_early.description = text[:1000]
+                await config.save(state.cfg)
+                await event.respond(
+                    "✅ Пожелания сохранены:\n\n"
+                    f"{sub_early.description}\n\n"
+                    "Теперь я буду отдельно сверять с ними каждое объявление, "
+                    "которое прошло остальные фильтры.",
+                    buttons=kb.filters_menu(sub_early),
+                )
+            return
+
         if not text.startswith("/"):
             return
 
@@ -230,6 +251,23 @@ async def _route(event, state: config.State, sub: Subscriber, action: str, arg: 
         else:
             sub.sources.append(arg)
         await _menu(event, state, sub, "src")
+    elif action == "desc":
+        if arg == "edit":
+            state.awaiting[sub.user_id] = "description"
+            changed = False
+            await event.edit(
+                "📝 Опиши, что тебе важно, обычным текстом — следующим сообщением.\n\n"
+                "Цену, комнаты и район указывать не нужно, они уже настроены кнопками.\n"
+                "Пиши про остальное, например:\n"
+                "«с балконом, можно с котом, не первый этаж, есть стиральная машина»\n\n"
+                "Учти: каждое такое пожелание проверяется отдельным запросом к Claude, "
+                "но только для объявлений, прошедших остальные фильтры.",
+                buttons=kb.description_menu(sub),
+            )
+        elif arg == "clear":
+            sub.description = ""
+            state.awaiting.pop(sub.user_id, None)
+            await _menu(event, state, sub, "desc")
     elif action == "adm":
         if not sub.is_owner:
             await event.answer("Только владелец.", alert=True)
@@ -315,6 +353,22 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
             "Объявления без указания района проходят всегда.",
             buttons=kb.districts_menu(sub),
         )
+    elif screen == "desc":
+        if sub.description:
+            body = f"📝 Твои пожелания:\n\n{sub.description}"
+        else:
+            body = (
+                "📝 Пожелания не заданы.\n\n"
+                "Это свободный текст про то, что не выражается кнопками: балкон, "
+                "животные, этаж, техника. Claude сверяет его с каждым объявлением, "
+                "уже прошедшим остальные фильтры."
+            )
+        await event.edit(body, buttons=kb.description_menu(sub))
+    elif screen == "stats":
+        if not sub.is_owner:
+            await event.answer("Только владелец.", alert=True)
+            return
+        await event.edit(stats_mod.render(state.stats), buttons=kb.stats_menu())
     elif screen == "src":
         await event.edit(
             "🌐 Откуда брать объявления", buttons=kb.sources_menu(sub)
@@ -489,8 +543,15 @@ async def _cmd_chats(event, user_client, state, sub, args) -> None:
     await event.respond("Есть /chats, /chats add <чат>, /chats rm <чат>")
 
 
+async def _cmd_stats(event, user_client, state, sub, args) -> None:
+    if not sub.is_owner:
+        return
+    await event.respond(stats_mod.render(state.stats), buttons=kb.stats_menu())
+
+
 _HANDLERS = {
     "/menu": _cmd_menu,
+    "/stats": _cmd_stats,
     "/help": _cmd_help,
     "/status": _cmd_status,
     "/stop": _cmd_stop,

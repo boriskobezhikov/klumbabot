@@ -43,6 +43,7 @@ def main_menu(sub: Subscriber) -> list[list[Button]]:
                 Button.inline("🛠 Сбор", b"m:admin"),
             ]
         )
+        rows.append([Button.inline("📈 Статистика", b"m:stats")])
     return rows
 
 
@@ -56,9 +57,22 @@ def filters_menu(sub: Subscriber) -> list[list[Button]]:
             Button.inline(f"💰 До {sub.budget_usd}$", b"m:budget"),
             Button.inline(f"📍 Районы: {len(sub.district_list) or 'все'}", b"m:dist"),
         ],
-        [Button.inline(f"🌐 Источники: {len(sub.sources)}/2", b"m:src")],
+        [
+            Button.inline(f"🌐 Источники: {len(sub.sources)}/2", b"m:src"),
+            Button.inline(
+                "📝 Пожелания ✅" if sub.description else "📝 Пожелания", b"m:desc"
+            ),
+        ],
         [Button.inline(BACK, b"m:main")],
     ]
+
+
+def description_menu(sub: Subscriber) -> list[list[Button]]:
+    rows = [[Button.inline("✏️ Написать заново", b"desc:edit")]]
+    if sub.description:
+        rows.append([Button.inline("🗑 Убрать пожелания", b"desc:clear")])
+    rows.append([Button.inline(BACK, b"m:filters")])
+    return rows
 
 
 def _short(values: list[int]) -> str:
@@ -210,6 +224,13 @@ def admin_menu(cfg) -> list[list[Button]]:
 
 
 # ---------------------------------------------------------------------------
+def stats_menu() -> list[list[Button]]:
+    return [
+        [Button.inline("🔄 Обновить", b"m:stats")],
+        [Button.inline(BACK, b"m:main")],
+    ]
+
+
 def parse(data: bytes) -> tuple[str, str]:
     """b'bed:2' -> ('bed', '2')"""
     text = data.decode("utf-8", "replace")

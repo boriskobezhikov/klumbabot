@@ -34,6 +34,7 @@ import commands
 import config
 import districts
 import ssge
+import stats as stats_mod
 import users as users_mod
 
 load_dotenv()
@@ -60,6 +61,7 @@ bot = TelegramClient(f"{SESSION_NAME}_bot", API_ID, API_HASH)
 bot.parse_mode = None  # в тексты попадают regex — markdown бы их поломал
 
 state = config.State(cfg=config.load(owner_id=OWNER_ID))
+state.stats = stats_mod.load(config.CONFIG_PATH)
 
 
 async def notify(user_id: int, text: str, buttons=None) -> None:
@@ -78,6 +80,7 @@ async def extract(text: str) -> dict | None:
     now = time.time()
     state.api_calls = [t for t in state.api_calls if now - t < 86400]
     state.api_calls.append(now)
+    state.stats.bump("claude_extract")
 
     try:
         resp = await anthropic_client.messages.create(
@@ -100,7 +103,36 @@ async def extract(text: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # Раздача подписчикам
 # ---------------------------------------------------------------------------
-async def fan_out(facts: dict, source: str, link: str | None, origin: str) -> int:
+async def personal_check(sub, listing_text: str) -> tuple[bool, str]:
+    """
+    Сверяет объявление со свободным текстом пожеланий подписчика.
+
+    Это ВТОРОЙ вызов Claude и он платный, поэтому вызывается лениво: только
+    после того, как объявление прошло структурные фильтры этого человека.
+    У кого пожелания не заданы, сюда вообще не попадают.
+    """
+    state.stats.bump("claude_match")
+    try:
+        resp = await anthropic_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=200,
+            system=config.build_match_prompt(sub.description),
+            messages=[{"role": "user", "content": listing_text[:2500]}],
+        )
+        raw = resp.content[0].text.strip()
+        raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
+        verdict = json.loads(raw)
+    except Exception as e:  # noqa: BLE001
+        # Сбой проверки не должен глотать объявление, которое уже подошло
+        # по всем измеримым признакам — лучше прислать с оговоркой.
+        log.warning("personal_check() failed: %s", e)
+        return True, "пожелания проверить не удалось"
+
+    return bool(verdict.get("match")), str(verdict.get("reason") or "")
+
+
+async def fan_out(facts: dict, source: str, link: str | None, origin: str,
+                  listing_text: str = "") -> int:
     """Рассылает объявление всем, чьим фильтрам оно отвечает. Возвращает счёт."""
     sent = 0
     for sub in state.cfg.active():
@@ -108,6 +140,14 @@ async def fan_out(facts: dict, source: str, link: str | None, origin: str) -> in
         if not ok:
             log.debug("  %s: нет — %s", sub.label(), why)
             continue
+
+        note = ""
+        if sub.description and listing_text:
+            ok, reason = await personal_check(sub, listing_text)
+            if not ok:
+                log.info("  %s: не по пожеланиям — %s", sub.label(), reason)
+                continue
+            note = reason
 
         price = facts.get("price_usd")
         parts = [
@@ -121,9 +161,12 @@ async def fan_out(facts: dict, source: str, link: str | None, origin: str) -> in
             f" | {facts.get('area_m2') or '?'} м²"
             f" | Район: {facts.get('district') or 'не указан'}",
         ]
+        if note:
+            parts.append(f"По твоим пожеланиям: {note}")
         if link:
             parts += ["", link]
         await notify(sub.user_id, "\n".join(parts))
+        state.stats.bump("notified")
         sent += 1
     return sent
 
@@ -170,6 +213,7 @@ async def handler(event) -> None:
     text = event.raw_text or ""
     if not text:
         return
+    state.stats.bump("tg_seen")
 
     if cfg.prefilter_enabled:
         try:
@@ -184,7 +228,10 @@ async def handler(event) -> None:
             if not bedroom.search(text):
                 return
 
+    state.stats.bump("tg_prefiltered")
+
     if _seen_recently(_dedup_key(text)):
+        state.stats.bump("dup")
         log.info("dup #%s в %s — пропуск", event.id, chat.label())
         return
 
@@ -195,7 +242,9 @@ async def handler(event) -> None:
         return
 
     link = chats_mod.message_link(chat, event.id)
-    sent = await fan_out(facts, users_mod.SOURCE_TELEGRAM, link, chat.label())
+    sent = await fan_out(
+        facts, users_mod.SOURCE_TELEGRAM, link, chat.label(), listing_text=text
+    )
     log.info("-> #%s разослано %s подписчикам", event.id, sent)
 
 
@@ -209,6 +258,7 @@ async def handler(event) -> None:
 async def _handle_ssge_listing(listing: ssge.Listing) -> None:
     ceiling = max_active_budget()
     if ceiling and listing.price_usd and listing.price_usd > ceiling:
+        state.stats.bump("ssge_price_cut")
         log.info(
             "ss.ge #%s: %s$ дороже самого щедрого бюджета %s$ — пропуск",
             listing.id, listing.price_usd, ceiling,
@@ -232,7 +282,10 @@ async def _handle_ssge_listing(listing: ssge.Listing) -> None:
     if facts.get("district") is None:
         facts["district"] = districts.normalize(listing.district)
 
-    sent = await fan_out(facts, users_mod.SOURCE_SSGE, listing.url, "ss.ge")
+    sent = await fan_out(
+        facts, users_mod.SOURCE_SSGE, listing.url, "ss.ge",
+        listing_text=listing.as_prompt(),
+    )
     log.info("-> ss.ge #%s разослано %s подписчикам", listing.id, sent)
 
 
@@ -262,12 +315,14 @@ async def poll_ssge() -> None:
             await asyncio.sleep(max(60, int(s["poll_minutes"]) * 60))
             continue
 
+        state.stats.bump("ssge_fetched", len(listings))
         fresh = [l for l in listings if l.id not in seen]
         for listing in fresh:
             seen.add(listing.id)
             seen_ids.insert(0, listing.id)
         config.save_seen_ids(seen_ids)
 
+        state.stats.bump("ssge_new", len(fresh))
         state.ssge_last_poll = time.time()
         state.ssge_last_new = len(fresh)
         state.ssge_seen_count = len(seen)
@@ -284,6 +339,7 @@ async def poll_ssge() -> None:
             for listing in fresh:
                 await _handle_ssge_listing(listing)
 
+        stats_mod.save(config.CONFIG_PATH, state.stats)
         await asyncio.sleep(int(s["poll_minutes"]) * 60)
 
 
