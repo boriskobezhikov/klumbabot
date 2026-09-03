@@ -51,11 +51,22 @@ OWNER_ID = int(os.environ["NOTIFY_CHAT_ID"])
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+# Ключи, привязанные к личности (identity-linked), требуют указывать рабочее
+# пространство отдельным заголовком, иначе API отвечает 400. Для обычных
+# ключей переменная не нужна и заголовок не отправляется.
+ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
 
 DEDUP_TTL = 24 * 3600
 LAST_KEPT = 15  # сколько последних разборов помнить для /last
 
-anthropic_client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+anthropic_client = AsyncAnthropic(
+    api_key=ANTHROPIC_API_KEY,
+    default_headers=(
+        {"anthropic-workspace-id": ANTHROPIC_WORKSPACE_ID}
+        if ANTHROPIC_WORKSPACE_ID
+        else None
+    ),
+)
 
 user_client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 bot = TelegramClient(f"{SESSION_NAME}_bot", API_ID, API_HASH)

@@ -75,6 +75,11 @@ venv, раскладывает права и регистрирует серви
   Узнать: напишите боту, откройте
   `https://api.telegram.org/bot<ТОКЕН>/getUpdates`, возьмите `"chat":{"id": ...}`.
 - **ANTHROPIC_API_KEY** — https://platform.claude.com, с привязанной картой.
+- **ANTHROPIC_WORKSPACE_ID** — нужен **только** для ключей, привязанных к
+  личности (identity-linked). Такой ключ без него отвечает
+  `400 anthropic-workspace-id is required`. Взять id: Settings → Workspaces
+  или из адреса `platform.claude.com/workspaces/<этот-id>/…`. Для обычных
+  ключей переменную задавать не надо — заголовок тогда не отправляется.
 
 ### Первый вход
 

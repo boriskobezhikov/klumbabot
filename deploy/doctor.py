@@ -38,6 +38,7 @@ for name, required in (
     ("NOTIFY_CHAT_ID", True),
     ("ANTHROPIC_API_KEY", True),
     ("CLAUDE_MODEL", False),
+    ("ANTHROPIC_WORKSPACE_ID", False),
 ):
     val = os.environ.get(name)
     if not val:
@@ -95,7 +96,13 @@ try:
 
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY пуст")
-    client = Anthropic(api_key=key)
+    ws = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+    if ws:
+        print(f"     рабочее пространство: {ws}")
+    client = Anthropic(
+        api_key=key,
+        default_headers={"anthropic-workspace-id": ws} if ws else None,
+    )
     resp = client.messages.create(
         model=model,
         max_tokens=20,
@@ -107,6 +114,18 @@ try:
 except Exception as e:  # noqa: BLE001
     name = type(e).__name__
     print(f"{BAD} {name}: {e}")
+    if "anthropic-workspace-id" in str(e):
+        if "must be a valid" in str(e):
+            print(f"{WARN} id рабочего пространства задан, но неверный.")
+            print("       Исправь ANTHROPIC_WORKSPACE_ID в /opt/klumba-bot/.env")
+        else:
+            print(f"{WARN} ключ привязан к личности и требует id рабочего пространства.")
+            print("       Добавь в /opt/klumba-bot/.env строку:")
+            print("           ANTHROPIC_WORKSPACE_ID=wrkspc_...")
+        print("       Взять id: platform.claude.com -> Settings -> Workspaces,")
+        print("       либо скопировать из адреса вида")
+        print("       platform.claude.com/workspaces/<вот-этот-id>/...")
+        print("       Затем: systemctl restart klumba-bot")
     hint = {
         "AuthenticationError": "ключ неверный или отозван — пересоздай на platform.claude.com",
         "PermissionDeniedError": "у ключа нет доступа к модели или не привязана карта",
