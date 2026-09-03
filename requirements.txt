@@ -1,0 +1,4 @@
+telethon>=1.36
+anthropic>=0.40
+httpx>=0.27
+python-dotenv>=1.0

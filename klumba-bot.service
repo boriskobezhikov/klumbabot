@@ -1,0 +1,16 @@
+[Unit]
+Description=Klumba rental listing monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust these two paths to where you actually put the project and your venv:
+WorkingDirectory=/opt/klumba-bot
+ExecStart=/opt/klumba-bot/venv/bin/python /opt/klumba-bot/main.py
+Restart=on-failure
+RestartSec=10
+EnvironmentFile=/opt/klumba-bot/.env
+
+[Install]
+WantedBy=multi-user.target
