@@ -23,6 +23,7 @@ import os
 import re
 import time
 
+import httpx
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
@@ -30,6 +31,7 @@ from telethon import TelegramClient, events
 import chats as chats_mod
 import commands
 import config
+import ssge
 
 load_dotenv()
 
@@ -170,6 +172,102 @@ async def handler(event) -> None:
         log.info("-> skip #%s (%s)", event.id, verdict.get("reason", ""))
 
 
+# ---------------------------------------------------------------------------
+# Опрос ss.ge
+#
+# Regex-предфильтр сюда не применяется — он написан под русские сообщения из
+# чата и отсёк бы грузинские описания целиком. Вместо него отсекаем по цене:
+# сайт отдаёт её сразу в долларах, так что это бесплатно и точно.
+# ---------------------------------------------------------------------------
+async def _handle_ssge_listing(listing: ssge.Listing) -> None:
+    cfg = state.cfg
+
+    if listing.price_usd and listing.price_usd > cfg.budget_usd:
+        log.info(
+            "ss.ge #%s: %s$ > бюджета %s$ — пропуск",
+            listing.id, listing.price_usd, cfg.budget_usd,
+        )
+        return
+
+    log.info(
+        "ss.ge candidate #%s: %s$ %sм² %s",
+        listing.id, listing.price_usd, listing.area_m2, listing.location(),
+    )
+
+    verdict = await classify(listing.as_prompt())
+    if not verdict:
+        return
+
+    if not verdict.get("match"):
+        log.info("-> skip ss.ge #%s (%s)", listing.id, verdict.get("reason", ""))
+        return
+
+    price = verdict.get("price_usd") or listing.price_usd or "?"
+    area = verdict.get("area_m2") or listing.area_m2 or "?"
+    district = verdict.get("district") or listing.location()
+    await notify(
+        "🔥 Новое подходящее объявление\n\n"
+        "Источник: ss.ge\n"
+        f"{verdict.get('reason', '')}\n"
+        f"Цена: {price}$ | Площадь: {area} м² | Район: {district}\n\n"
+        f"{listing.url}"
+    )
+    log.info("-> notified for ss.ge #%s", listing.id)
+
+
+async def poll_ssge() -> None:
+    """Опрашивает ss.ge, пока жив процесс. Ошибки сети не должны его ронять."""
+    seen_ids = config.load_seen_ids()
+    seen = set(seen_ids)
+    # Пустой список = первый запуск. Тогда первый проход только запоминает
+    # текущую выдачу, иначе пользователь получил бы 30 уведомлений разом.
+    priming = not seen
+    state.ssge_seen_count = len(seen)
+
+    while True:
+        s = state.cfg.ssge
+        if not s["enabled"]:
+            await asyncio.sleep(60)
+            continue
+
+        try:
+            listings = await ssge.fetch_listings(
+                pages=int(s["pages"]),
+                city_id=int(s["city_id"]),
+                rooms=str(s["rooms"]),
+            )
+            state.ssge_last_error = None
+        except (ssge.SsgeError, httpx.HTTPError, asyncio.TimeoutError) as e:
+            state.ssge_last_error = str(e)
+            log.warning("ss.ge: опрос не удался: %s", e)
+            await asyncio.sleep(max(60, int(s["poll_minutes"]) * 60))
+            continue
+
+        fresh = [l for l in listings if l.id not in seen]
+        for listing in fresh:
+            seen.add(listing.id)
+            seen_ids.insert(0, listing.id)
+        config.save_seen_ids(seen_ids)
+
+        state.ssge_last_poll = time.time()
+        state.ssge_last_new = len(fresh)
+        state.ssge_seen_count = len(seen)
+
+        if priming:
+            priming = False
+            log.info("ss.ge: запомнил %s объявлений, слежу за новыми", len(listings))
+            await notify(
+                f"🌐 ss.ge подключён: проиндексировано {len(listings)} объявлений.\n"
+                "Уведомления пойдут только про новые."
+            )
+        else:
+            log.info("ss.ge: получено %s, новых %s", len(listings), len(fresh))
+            for listing in fresh:
+                await _handle_ssge_listing(listing)
+
+        await asyncio.sleep(int(s["poll_minutes"]) * 60)
+
+
 async def resolve_pending() -> list[str]:
     """Доставляет peer_id чатам, добавленным без него (в т.ч. из старого .env)."""
     problems: list[str] = []
@@ -202,11 +300,17 @@ async def main() -> None:
 
     active = [c for c in state.cfg.chats if c.peer_id is not None]
     listed = ", ".join(c.label() for c in active) or "ни одного"
-    log.info("Запущен. Слушаю: %s", listed)
+    ssge_note = (
+        f"каждые {state.cfg.ssge['poll_minutes']} мин"
+        if state.cfg.ssge["enabled"]
+        else "выключен"
+    )
+    log.info("Запущен. Слушаю: %s | ss.ge: %s", listed, ssge_note)
 
     msg = (
         "✅ Мониторинг запущен.\n"
         f"Чаты: {listed}\n"
+        f"ss.ge: {ssge_note}\n"
         f"Бюджет: {state.cfg.budget_usd}$\n\n"
         "/help — список команд"
     )
@@ -217,6 +321,7 @@ async def main() -> None:
     await asyncio.gather(
         user_client.run_until_disconnected(),
         bot.run_until_disconnected(),
+        poll_ssge(),
     )
 
 

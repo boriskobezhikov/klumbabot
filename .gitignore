@@ -1,5 +1,6 @@
 .env
 config.json
+ssge_seen.json
 
 # Файлы сессии Telethon = полный доступ к аккаунту, коммитить нельзя
 *.session

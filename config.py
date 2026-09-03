@@ -41,6 +41,17 @@ DEFAULT_PREFILTER = {
 
 PREFILTER_FIELDS = ("listing", "bedroom", "seeking")
 
+# Опрос ss.ge. cityIdList=95 — Тбилиси, rooms — число комнат в фильтре сайта.
+# pages=2 (по 16 объявлений на страницу) с запасом покрывает поток новых
+# объявлений за интервал опроса.
+DEFAULT_SSGE = {
+    "enabled": True,
+    "poll_minutes": 10,
+    "pages": 2,
+    "city_id": 95,
+    "rooms": "1",
+}
+
 
 @dataclass
 class ChatRef:
@@ -67,6 +78,7 @@ class Config:
     criteria: str = DEFAULT_CRITERIA
     chats: list[ChatRef] = field(default_factory=list)
     prefilter: dict = field(default_factory=lambda: dict(DEFAULT_PREFILTER))
+    ssge: dict = field(default_factory=lambda: dict(DEFAULT_SSGE))
 
     # -- поиск по чатам ----------------------------------------------------
     def chat_by_peer_id(self, peer_id: int) -> ChatRef | None:
@@ -104,18 +116,22 @@ class Config:
             "criteria": self.criteria,
             "chats": [asdict(c) for c in self.chats],
             "prefilter": self.prefilter,
+            "ssge": self.ssge,
         }
 
     @classmethod
     def from_dict(cls, raw: dict) -> Config:
         prefilter = dict(DEFAULT_PREFILTER)
         prefilter.update(raw.get("prefilter") or {})
+        ssge = dict(DEFAULT_SSGE)
+        ssge.update(raw.get("ssge") or {})
         return cls(
             budget_usd=int(raw.get("budget_usd", 700)),
             gel_per_usd=float(raw.get("gel_per_usd", 2.6)),
             criteria=raw.get("criteria") or DEFAULT_CRITERIA,
             chats=[ChatRef(**c) for c in raw.get("chats") or []],
             prefilter=prefilter,
+            ssge=ssge,
         )
 
 
@@ -126,6 +142,12 @@ class State:
     cfg: Config
     api_calls: list[float] = field(default_factory=list)  # unix-время вызовов Claude
     seen: dict[str, float] = field(default_factory=dict)  # дедуп: хеш текста -> время
+
+    # Наблюдаемость опроса ss.ge (для /status)
+    ssge_last_poll: float | None = None
+    ssge_last_new: int = 0
+    ssge_seen_count: int = 0
+    ssge_last_error: str | None = None
 
 
 @functools.lru_cache(maxsize=8)
@@ -186,18 +208,49 @@ async def save(cfg: Config) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Просмотренные объявления ss.ge.
+#
+# Дедуп в памяти (State.seen) сбрасывается при перезапуске — для чата это
+# терпимо, а для сайта нет: после рестарта бот разослал бы заново всю первую
+# страницу выдачи. Поэтому id хранятся на диске.
+# ---------------------------------------------------------------------------
+SEEN_PATH = CONFIG_PATH.with_name("ssge_seen.json")
+SEEN_LIMIT = 5000  # id новее — в начале списка; хвост отбрасываем
+
+
+def load_seen_ids() -> list[int]:
+    if not SEEN_PATH.exists():
+        return []
+    try:
+        with SEEN_PATH.open(encoding="utf-8") as f:
+            return [int(i) for i in json.load(f).get("ids", [])]
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        log.warning("ssge_seen.json битый (%s) — начинаю с чистого списка", e)
+        return []
+
+
+def save_seen_ids(ids: list[int]) -> None:
+    tmp = SEEN_PATH.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump({"ids": ids[:SEEN_LIMIT]}, f)
+    os.replace(tmp, SEEN_PATH)
+
+
+# ---------------------------------------------------------------------------
 # Промпт для Claude — собирается на каждой классификации, поэтому правки
 # критериев/бюджета применяются без перезапуска.
 # ---------------------------------------------------------------------------
 def build_system_prompt(cfg: Config) -> str:
-    return f"""Ты фильтруешь объявления об аренде квартир из тбилисских Telegram-чатов.
+    return f"""Ты фильтруешь объявления об аренде квартир в Тбилиси — из Telegram-чатов и с сайта ss.ge.
 
 Пользователь ищет: {cfg.criteria}
 
 Бюджет: итоговая стоимость в месяц (аренда + коммуналка, если коммуналка указана
 явно) не больше ${cfg.budget_usd}.
 
-Тебе присылают текст ОДНОГО сообщения из чата. Верни СТРОГО json без markdown-обёртки, вида:
+Тебе присылают ОДНО объявление — сообщение из чата или карточку с сайта.
+Описания с ss.ge бывают на грузинском: переводить не нужно, просто пойми смысл,
+а reason напиши по-русски. Верни СТРОГО json без markdown-обёртки, вида:
 {{"match": true/false, "reason": "коротко по-русски почему да/нет", "price_usd": число_или_null,
 "area_m2": число_или_null, "district": "строка_или_null"}}
 

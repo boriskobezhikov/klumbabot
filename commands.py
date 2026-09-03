@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from telethon import events
@@ -36,7 +37,13 @@ HELP = """Команды:
 /prefilter — показать regex-предфильтр
 /prefilter on|off — включить/выключить
 /prefilter listing <regex> — заменить одну из регулярок
-   (listing — признак сдачи, bedroom — тип жилья, seeking — признак поиска)"""
+   (listing — признак сдачи, bedroom — тип жилья, seeking — признак поиска)
+
+/ssge — состояние опроса сайта ss.ge
+/ssge on|off — включить/выключить
+/ssge interval 10 — как часто опрашивать, минут
+/ssge pages 2 — сколько страниц выдачи проверять
+/ssge rooms 1 — число комнат в фильтре сайта"""
 
 
 def register(bot, user_client, state: config.State, owner_id: int) -> None:
@@ -84,11 +91,21 @@ async def _status(event, user_client, state, args) -> None:
 
     pf = "включён" if cfg.prefilter["enabled"] else "ВЫКЛЮЧЕН (все сообщения идут в Claude)"
 
+    if cfg.ssge["enabled"]:
+        ssge_line = f"каждые {cfg.ssge['poll_minutes']} мин"
+        if state.ssge_last_poll:
+            ssge_line += f", последний {int((now - state.ssge_last_poll) / 60)} мин назад"
+        if state.ssge_last_error:
+            ssge_line += " ⚠️ с ошибкой"
+    else:
+        ssge_line = "выключен"
+
     await event.respond(
         "📊 Klumba monitor\n\n"
         f"Бюджет: {cfg.budget_usd}$\n"
         f"Курс: {cfg.gel_per_usd} GEL/USD\n"
-        f"Предфильтр: {pf}\n"
+        f"Предфильтр (чаты): {pf}\n"
+        f"ss.ge: {ssge_line}\n"
         f"Вызовов Claude за 24ч: {calls_24h}\n\n"
         f"Чаты ({len(cfg.chats)}):\n{chats}\n\n"
         f"Критерии:\n{cfg.criteria}"
@@ -196,6 +213,83 @@ async def _criteria(event, user_client, state, args) -> None:
     await event.respond(f"✅ Критерии обновлены:\n{args}")
 
 
+async def _ssge(event, user_client, state, args) -> None:
+    cfg = state.cfg
+    s = cfg.ssge
+    sub, _, rest = args.partition(" ")
+    sub = sub.lower()
+    rest = rest.strip()
+
+    if not sub:
+        if state.ssge_last_poll:
+            ago = int((time.time() - state.ssge_last_poll) / 60)
+            last = f"{ago} мин назад, новых за проход: {state.ssge_last_new}"
+        else:
+            last = "ещё не опрашивался"
+        body = (
+            f"🌐 ss.ge: {'включён' if s['enabled'] else 'выключен'}\n"
+            f"Интервал: {s['poll_minutes']} мин\n"
+            f"Страниц за проход: {s['pages']}\n"
+            f"Комнат: {s['rooms']}\n"
+            f"Последний опрос: {last}\n"
+            f"Известных объявлений: {state.ssge_seen_count}"
+        )
+        if state.ssge_last_error:
+            body += f"\n⚠️ Последняя ошибка: {state.ssge_last_error}"
+        await event.respond(body)
+        return
+
+    if sub in ("on", "off"):
+        s["enabled"] = sub == "on"
+        await config.save(cfg)
+        await event.respond(f"✅ ss.ge {'включён' if s['enabled'] else 'выключен'}.")
+        return
+
+    if sub == "interval":
+        try:
+            value = int(rest)
+        except ValueError:
+            await event.respond("Нужно целое число минут, например: /ssge interval 10")
+            return
+        if value < 2:
+            await event.respond("Минимум 2 минуты — чаще опрашивать сайт незачем.")
+            return
+        s["poll_minutes"] = value
+        await config.save(cfg)
+        await event.respond(
+            f"✅ Интервал: {value} мин.\nПрименится после текущей паузы опроса."
+        )
+        return
+
+    if sub == "pages":
+        try:
+            value = int(rest)
+        except ValueError:
+            await event.respond("Нужно целое число, например: /ssge pages 2")
+            return
+        if not 1 <= value <= 10:
+            await event.respond("Разумный диапазон — от 1 до 10 страниц.")
+            return
+        s["pages"] = value
+        await config.save(cfg)
+        await event.respond(f"✅ Страниц за проход: {value} (~{value * 16} объявлений).")
+        return
+
+    if sub == "rooms":
+        if not rest or not re.fullmatch(r"\d+(,\d+)*", rest):
+            await event.respond("Например: /ssge rooms 1 или /ssge rooms 1,2")
+            return
+        s["rooms"] = rest
+        await config.save(cfg)
+        await event.respond(f"✅ Комнат: {rest}")
+        return
+
+    await event.respond(
+        f"Не понял «{sub}». Есть: /ssge, /ssge on|off, /ssge interval N, "
+        "/ssge pages N, /ssge rooms N"
+    )
+
+
 async def _prefilter(event, user_client, state, args) -> None:
     cfg = state.cfg
     sub, _, rest = args.partition(" ")
@@ -254,4 +348,5 @@ _HANDLERS = {
     "/chats": _chats,
     "/criteria": _criteria,
     "/prefilter": _prefilter,
+    "/ssge": _ssge,
 }
