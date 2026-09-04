@@ -65,6 +65,9 @@ try:
 
     cfg = config.load()
     print(f"{OK} config.json прочитан: {config.CONFIG_PATH}")
+    if cfg.stopped:
+        print(f"{WARN} БОТ ОСТАНОВЛЕН общим стоп-краном — ничего не собирается.")
+        print("       Снять: кнопка «▶️ Возобновить работу» или /stopall off")
     active = cfg.active()
     print(f"{OK} подписчиков всего: {len(cfg.subscribers)}, активных: {len(active)}")
     if not active:

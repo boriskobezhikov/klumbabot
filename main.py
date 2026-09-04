@@ -163,6 +163,11 @@ async def personal_check(sub, listing_text: str) -> tuple[bool, str]:
 async def fan_out(facts: dict, source: str, link: str | None, origin: str,
                   listing_text: str = "") -> int:
     """Рассылает объявление всем, чьим фильтрам оно отвечает. Возвращает счёт."""
+    # Страховка на случай, если объявление всё же добралось сюда при опущенном
+    # стоп-кране: наверх по стеку он уже проверен, но рассылка — последний
+    # рубеж, и лучше ей знать про стоп самой.
+    if state.cfg.stopped:
+        return 0
     sent = 0
     verdicts: list[str] = []
     for sub in state.cfg.active():
@@ -275,6 +280,10 @@ def _seen_recently(key: str) -> bool:
 @user_client.on(events.NewMessage)
 async def handler(event) -> None:
     cfg = state.cfg
+    # Стоп-кран проверяется до всего остального: ни счётчиков, ни дедупликации,
+    # ни тем более обращений к Claude. Остановлено значит остановлено.
+    if cfg.stopped:
+        return
     chat = cfg.chat_by_peer_id(event.chat_id)
     if chat is None:
         return
@@ -397,10 +406,26 @@ async def poll_ssge() -> None:
     seen_ids = config.load_seen_ids()
     seen = set(seen_ids)
     priming = not seen
+    # Переиндексаций может быть несколько (после каждого стопа), но «ss.ge
+    # подключён» уместно сказать один раз — при самом первом запуске.
+    first_prime = priming
     state.ssge_seen_count = len(seen)
 
     while True:
         s = state.cfg.ssge
+        # Пока стоп-кран опущен — ни одного запроса к сайту.
+        if state.cfg.stopped:
+            await asyncio.sleep(30)
+            continue
+        # Возобновились после стопа: первый проход только переиндексирует.
+        # Иначе он посчитал бы новым всё, что накопилось за простой, и вывалил
+        # бы пачкой. Флаг снимаем здесь же и сразу пишем на диск — если процесс
+        # умрёт между переиндексацией и сохранением, повторная ничего не
+        # испортит, а вот потерянный флаг обернулся бы той самой пачкой.
+        if state.cfg.reprime_pending:
+            priming = True
+            state.cfg.reprime_pending = False
+            await config.save(state.cfg)
         if not s["enabled"]:
             await asyncio.sleep(60)
             continue
@@ -433,10 +458,20 @@ async def poll_ssge() -> None:
         if priming:
             priming = False
             log.info("ss.ge: запомнил %s объявлений, слежу за новыми", len(listings))
-            await notify_owner(
-                f"🌐 ss.ge подключён: проиндексировано {len(listings)} объявлений.\n"
-                "Уведомления пойдут только про новые."
-            )
+            if first_prime:
+                first_prime = False
+                await notify_owner(
+                    f"🌐 ss.ge подключён: проиндексировано {len(listings)} объявлений.\n"
+                    "Уведомления пойдут только про новые."
+                )
+            elif fresh:
+                # Возобновление после стопа. Про накопившееся молчим, но честно
+                # говорим сколько его было — чтобы это не выглядело пропажей.
+                await notify_owner(
+                    f"🌐 ss.ge переиндексирован: за простой набралось "
+                    f"{len(fresh)} объявлений, их не присылаю.\n"
+                    "Дальше — только про новые."
+                )
         else:
             log.info("ss.ge: получено %s, новых %s", len(listings), len(fresh))
             # Один клиент на весь проход: карточек за раз бывает много, а

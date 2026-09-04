@@ -26,7 +26,7 @@ def _toggle(label: str, on: bool) -> str:
 # ---------------------------------------------------------------------------
 # Главное меню
 # ---------------------------------------------------------------------------
-def main_menu(sub: Subscriber) -> list[list[Button]]:
+def main_menu(sub: Subscriber, stopped: bool = False) -> list[list[Button]]:
     rows = [
         [Button.inline("⚙️ Мои фильтры", b"m:filters")],
         [
@@ -44,7 +44,30 @@ def main_menu(sub: Subscriber) -> list[list[Button]]:
             ]
         )
         rows.append([Button.inline("📈 Статистика", b"m:stats")])
+        # Отдельной строкой и последним: это рубильник для всех, а не ещё
+        # одна настройка. Когда он опущен — это первое, что должно быть видно.
+        rows.append(
+            [
+                Button.inline(
+                    "▶️ ВОЗОБНОВИТЬ РАБОТУ" if stopped else "⛔ Остановить всё",
+                    b"m:stopall",
+                )
+            ]
+        )
     return rows
+
+
+def stopall_menu(stopped: bool) -> list[list[Button]]:
+    """Подтверждение стопа. Кнопка одна и названа тем, что произойдёт."""
+    if stopped:
+        return [
+            [Button.inline("▶️ Возобновить работу", b"stop:no")],
+            [Button.inline(BACK, b"m:main")],
+        ]
+    return [
+        [Button.inline("⛔ Да, остановить для всех", b"stop:yes")],
+        [Button.inline("← Отмена", b"m:main")],
+    ]
 
 
 def filters_menu(sub: Subscriber) -> list[list[Button]]:

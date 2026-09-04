@@ -43,7 +43,9 @@ OWNER_HELP = """
 /users — список людей и заявок
 /stats — сколько собрано и во что обошёлся Claude
 /last — последние разборы и почему они кому-то не подошли
-/rate 2.7 — курс GEL за 1 USD"""
+/rate 2.7 — курс GEL за 1 USD
+/stopall — остановить бота для ВСЕХ (сбор, Claude, уведомления)
+/stopall off — возобновить"""
 
 
 def register(bot, user_client, state: config.State, owner_id: int) -> None:
@@ -170,7 +172,54 @@ async def _start(event, notify_owner, state: config.State, uid: int) -> None:
         sub.paused = False
         await config.save(cfg)
         await event.respond("Уведомления снова включены.")
-    await _show_main(event, sub, respond=True)
+    await _show_main(event, sub, respond=True, cfg=cfg)
+
+
+async def _set_stopped(event, state: config.State, stopped: bool) -> None:
+    """
+    Опускает или поднимает общий стоп-кран и сообщает об этом подписчикам.
+
+    Люди узнают, что бот остановлен, — иначе для них это выглядит поломкой, и
+    они пойдут выяснять, почему ничего не приходит.
+    """
+    cfg = state.cfg
+    if cfg.stopped == stopped:
+        await event.answer("Уже в этом состоянии.")
+        return
+
+    told = await _apply_stop(event.client, cfg, stopped)
+    await event.answer("Остановлено." if stopped else "Работа возобновлена.")
+    note = f"\n\nСообщил {told} чел." if told else ""
+    await event.edit(_stopall_text(cfg) + note, buttons=kb.stopall_menu(cfg.stopped))
+
+
+async def _apply_stop(client, cfg: config.Config, stopped: bool) -> int:
+    """Меняет стоп, сохраняет и оповещает подписчиков. Возвращает, скольким."""
+    cfg.stopped = stopped
+    cfg.stopped_at = time.time() if stopped else 0.0
+    if stopped:
+        # Взводим здесь, а не при возобновлении: иначе бот, остановленный и
+        # перезапущенный, поднялся бы без метки о том, что был простой.
+        cfg.reprime_pending = True
+    await config.save(cfg)
+    log.info("владелец %s работу бота", "ОСТАНОВИЛ" if stopped else "возобновил")
+
+    text = (
+        "⛔ Владелец остановил бота. Сбор и уведомления выключены для всех.\n"
+        "Настройки сохранены — вернутся вместе с работой."
+        if stopped
+        else "▶️ Бот снова работает. Уведомления пойдут про новые объявления."
+    )
+    told = 0
+    for s in cfg.subscribers:
+        if s.is_owner or s.status != users_mod.STATUS_ACTIVE:
+            continue
+        try:
+            await client.send_message(s.user_id, text)
+            told += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("не смог сообщить %s о смене состояния: %s", s.user_id, e)
+    return told
 
 
 async def _decide(event, state: config.State, arg: str, allow: bool) -> None:
@@ -291,6 +340,11 @@ async def _route(event, state: config.State, sub: Subscriber, action: str, arg: 
             sub.description = ""
             state.awaiting.pop(sub.user_id, None)
             await _menu(event, state, sub, "desc")
+    elif action == "stop":
+        if not sub.is_owner:
+            await event.answer("Только владелец.", alert=True)
+            return
+        await _set_stopped(event, state, stopped=arg == "yes")
     elif action == "adm":
         if not sub.is_owner:
             await event.answer("Только владелец.", alert=True)
@@ -344,7 +398,9 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
     cfg = state.cfg
 
     if screen in ("main", ""):
-        await event.edit(_main_text(sub), buttons=kb.main_menu(sub))
+        await event.edit(
+            _main_text(sub, cfg), buttons=kb.main_menu(sub, cfg.stopped)
+        )
     elif screen == "filters":
         await event.edit(
             "⚙️ Твои фильтры\n\n" + sub.summary(), buttons=kb.filters_menu(sub)
@@ -403,6 +459,11 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
                 "уже прошедшим остальные фильтры."
             )
         await event.edit(body, buttons=kb.description_menu(sub))
+    elif screen == "stopall":
+        if not sub.is_owner:
+            await event.answer("Только владелец.", alert=True)
+            return
+        await event.edit(_stopall_text(cfg), buttons=kb.stopall_menu(cfg.stopped))
     elif screen == "stats":
         if not sub.is_owner:
             await event.answer("Только владелец.", alert=True)
@@ -422,7 +483,9 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
     elif screen == "pause":
         sub.paused = not sub.paused
         await config.save(cfg)
-        await event.edit(_main_text(sub), buttons=kb.main_menu(sub))
+        await event.edit(
+            _main_text(sub, cfg), buttons=kb.main_menu(sub, cfg.stopped)
+        )
     elif screen == "people":
         await event.edit(
             f"👥 Люди ({len(cfg.subscribers)})\n\n"
@@ -434,11 +497,45 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
         await event.edit(_admin_text(cfg), buttons=kb.admin_menu(cfg))
 
 
-def _main_text(sub: Subscriber) -> str:
+def _main_text(sub: Subscriber, cfg: config.Config | None = None) -> str:
     head = "🏠 Klumba\n\n"
-    if sub.paused:
+    # Стоп важнее личной паузы и показывается вместо неё: пока он опущен,
+    # своя пауза ни на что не влияет.
+    if cfg is not None and cfg.stopped:
+        head += "⛔ Бот остановлен — сбор и уведомления выключены для всех.\n\n"
+    elif sub.paused:
         head += "⏸ Уведомления на паузе.\n\n"
     return head + sub.summary()
+
+
+def _stopall_text(cfg: config.Config) -> str:
+    if cfg.stopped:
+        since = ""
+        if cfg.stopped_at:
+            mins = int((time.time() - cfg.stopped_at) / 60)
+            since = (
+                f"\n\nОстановлен {mins} мин назад."
+                if mins < 120
+                else f"\n\nОстановлен {mins // 60} ч назад."
+            )
+        return (
+            "⛔ Бот остановлен.\n\n"
+            "Сейчас не делается ничего: ss.ge не опрашивается, сообщения в "
+            "чатах не читаются, к Claude обращений нет, уведомления не "
+            "рассылаются. Деньги не тратятся." + since + "\n\n"
+            "При возобновлении выдача ss.ge индексируется заново — "
+            "накопившееся за простой я не пришлю, чтобы не заваливать пачкой. "
+            "Сколько его было, скажу отдельно."
+        )
+    others = len([s for s in cfg.active() if not s.is_owner])
+    who = f"{others} чел. получат сообщение об этом" if others else "кроме тебя никого нет"
+    return (
+        "⛔ Остановить бота для всех?\n\n"
+        "Прекратится всё: опрос ss.ge, чтение чатов, обращения к Claude и "
+        "рассылка уведомлений. Настройки и списки сохранятся.\n\n"
+        f"Это касается всех подписчиков — {who}.\n\n"
+        "Включить обратно можно одной кнопкой в любой момент."
+    )
 
 
 def _status_text(state: config.State, sub: Subscriber) -> str:
@@ -446,7 +543,10 @@ def _status_text(state: config.State, sub: Subscriber) -> str:
     now = time.time()
     calls = sum(1 for t in state.api_calls if now - t < 86400)
 
-    lines = ["📊 Что настроено\n", sub.summary(), ""]
+    head = "📊 Что настроено\n"
+    if cfg.stopped:
+        head = "⛔ БОТ ОСТАНОВЛЕН для всех — ничего не собирается.\n\n" + head
+    lines = [head, sub.summary(), ""]
     if sub.is_owner:
         chats = ", ".join(c.label() for c in cfg.chats if c.peer_id) or "нет"
         if cfg.ssge["enabled"]:
@@ -478,8 +578,13 @@ def _admin_text(cfg: config.Config) -> str:
     )
 
 
-async def _show_main(event, sub: Subscriber, respond: bool = False) -> None:
-    await event.respond(_main_text(sub), buttons=kb.main_menu(sub))
+async def _show_main(
+    event, sub: Subscriber, respond: bool = False, cfg: config.Config | None = None
+) -> None:
+    await event.respond(
+        _main_text(sub, cfg),
+        buttons=kb.main_menu(sub, bool(cfg and cfg.stopped)),
+    )
 
 
 def _help_for(sub: Subscriber) -> str:
@@ -490,7 +595,7 @@ def _help_for(sub: Subscriber) -> str:
 # Текстовые команды
 # ---------------------------------------------------------------------------
 async def _cmd_menu(event, user_client, state, sub, args) -> None:
-    await _show_main(event, sub)
+    await _show_main(event, sub, cfg=state.cfg)
 
 
 async def _cmd_help(event, user_client, state, sub, args) -> None:
@@ -505,6 +610,34 @@ async def _cmd_stop(event, user_client, state, sub, args) -> None:
     sub.paused = True
     await config.save(state.cfg)
     await event.respond("⏸ Уведомления остановлены. /start — включить обратно.")
+
+
+async def _cmd_stopall(event, user_client, state, sub, args) -> None:
+    """
+    Быстрый рубильник текстом, без подтверждения.
+
+    Кнопка спрашивает подтверждение — по ней легко промахнуться, а стоп
+    рассылает сообщение всем подписчикам. Команду же владелец набирает
+    осознанно, и лишний вопрос тут только мешал бы: /stopall нужен как раз
+    тогда, когда надо остановить прямо сейчас.
+    """
+    if not sub.is_owner:
+        return
+    cfg = state.cfg
+    want = not (args.strip().lower() in ("off", "выкл", "возобновить"))
+    if cfg.stopped == want:
+        await event.respond(
+            "Уже остановлен. /stopall off — возобновить."
+            if want
+            else "Бот и так работает."
+        )
+        return
+
+    told = await _apply_stop(event.client, cfg, want)
+    await event.respond(
+        _stopall_text(cfg) + (f"\n\nСообщил {told} чел." if told else ""),
+        buttons=kb.stopall_menu(cfg.stopped),
+    )
 
 
 async def _cmd_rate(event, user_client, state, sub, args) -> None:
@@ -642,6 +775,7 @@ _HANDLERS = {
     "/help": _cmd_help,
     "/status": _cmd_status,
     "/stop": _cmd_stop,
+    "/stopall": _cmd_stopall,
     "/rate": _cmd_rate,
     "/users": _cmd_users,
     "/chats": _cmd_chats,

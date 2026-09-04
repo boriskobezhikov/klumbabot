@@ -67,6 +67,17 @@ class ChatRef:
 class Config:
     gel_per_usd: float = 2.6
     prefilter_enabled: bool = True
+    # Общий стоп-кран владельца: останавливает ВСЁ разом — опрос ss.ge, чтение
+    # чатов, обращения к Claude и рассылку. Личная пауза подписчика (paused)
+    # выключает только его уведомления, сбор при этом продолжается и деньги
+    # тратятся. Здесь не тратится ничего.
+    stopped: bool = False
+    stopped_at: float = 0.0
+    # Взводится вместе со стопом и живёт в файле, а не в памяти цикла опроса:
+    # между стопом и возобновлением бота вполне могут перезапустить, и тогда
+    # локальный флаг потерялся бы, а накопившееся за простой прилетело бы
+    # пачкой. Снимается первым же проходом после возобновления.
+    reprime_pending: bool = False
     chats: list[ChatRef] = field(default_factory=list)
     ssge: dict = field(default_factory=lambda: dict(DEFAULT_SSGE))
     subscribers: list[Subscriber] = field(default_factory=list)
@@ -128,6 +139,9 @@ class Config:
             "version": CONFIG_VERSION,
             "gel_per_usd": self.gel_per_usd,
             "prefilter_enabled": self.prefilter_enabled,
+            "stopped": self.stopped,
+            "stopped_at": self.stopped_at,
+            "reprime_pending": self.reprime_pending,
             "chats": [c.__dict__ for c in self.chats],
             "ssge": self.ssge,
             "users": [s.to_dict() for s in self.subscribers],
@@ -143,6 +157,11 @@ class Config:
         return cls(
             gel_per_usd=float(raw.get("gel_per_usd", 2.6)),
             prefilter_enabled=bool(raw.get("prefilter_enabled", True)),
+            # Стоп переживает перезапуск: иначе systemd-рестарт среди ночи
+            # молча включил бы бота обратно.
+            stopped=bool(raw.get("stopped", False)),
+            stopped_at=float(raw.get("stopped_at") or 0.0),
+            reprime_pending=bool(raw.get("reprime_pending", False)),
             chats=[ChatRef(**c) for c in raw.get("chats") or []],
             ssge=ssge,
             subscribers=[Subscriber.from_dict(u) for u in raw.get("users") or []],
