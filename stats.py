@@ -31,6 +31,7 @@ COUNTERS = (
     ("ssge_fetched", "получено с ss.ge"),
     ("ssge_new", "из них новых"),
     ("ssge_price_cut", "отсеяно по цене"),
+    ("ssge_area_cut", "отсеяно по площади"),
     ("ssge_detail", "карточек догружено"),
     ("dup", "дублей отброшено"),
     ("claude_extract", "разборов в Claude"),

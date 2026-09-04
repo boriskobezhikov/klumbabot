@@ -54,9 +54,10 @@ def filters_menu(sub: Subscriber) -> list[list[Button]]:
             Button.inline(f"🚪 Комнат: {_short(sub.rooms)}", b"m:room"),
         ],
         [
-            Button.inline(f"💰 До {sub.budget_usd}$", b"m:budget"),
-            Button.inline(f"📍 Районы: {len(sub.district_list) or 'все'}", b"m:dist"),
+            Button.inline(f"💰 Цена: {sub.price_range()}", b"m:budget"),
+            Button.inline(f"📐 Площадь: {sub.area_range()}", b"m:area"),
         ],
+        [Button.inline(f"📍 Районы: {len(sub.district_list) or 'все'}", b"m:dist")],
         [
             Button.inline(f"🌐 Источники: {len(sub.sources)}/2", b"m:src"),
             Button.inline(
@@ -105,19 +106,59 @@ def rooms_menu(sub: Subscriber) -> list[list[Button]]:
 
 
 def budget_menu(sub: Subscriber) -> list[list[Button]]:
-    return [
+    """
+    Две границы на одном экране: нижняя и верхняя.
+
+    Средняя кнопка в каждом ряду не действие, а показание — на неё повешен
+    шаг 0, чтобы нажатие ничего не меняло, но и не выглядело сломанным.
+    """
+    low = f"от {sub.min_price_usd}$" if sub.min_price_usd else "снизу любая"
+    rows = [
+        [
+            Button.inline("−100", b"minp:-100"),
+            Button.inline("−50", b"minp:-50"),
+            Button.inline(low, b"minp:0"),
+            Button.inline("+50", b"minp:50"),
+            Button.inline("+100", b"minp:100"),
+        ],
         [
             Button.inline("−100", b"budget:-100"),
             Button.inline("−50", b"budget:-50"),
-            Button.inline(f"{sub.budget_usd}$", b"budget:0"),
+            Button.inline(f"до {sub.budget_usd}$", b"budget:0"),
             Button.inline("+50", b"budget:50"),
             Button.inline("+100", b"budget:100"),
         ],
+    ]
+    if sub.min_price_usd:
+        rows.append([Button.inline("🚫 Убрать нижнюю границу", b"minp:=0")])
+    rows.append(
         [
-            Button.inline("500$", b"budget:=500"),
-            Button.inline("700$", b"budget:=700"),
-            Button.inline("1000$", b"budget:=1000"),
-            Button.inline("1500$", b"budget:=1500"),
+            Button.inline("до 500$", b"budget:=500"),
+            Button.inline("до 700$", b"budget:=700"),
+            Button.inline("до 1000$", b"budget:=1000"),
+            Button.inline("до 1500$", b"budget:=1500"),
+        ]
+    )
+    rows.append([Button.inline(BACK, b"m:filters")])
+    return rows
+
+
+def area_menu(sub: Subscriber) -> list[list[Button]]:
+    return [
+        [
+            Button.inline("−10", b"area:-10"),
+            Button.inline("−5", b"area:-5"),
+            Button.inline(
+                f"от {sub.min_area_m2} м²" if sub.min_area_m2 else "любая", b"area:0"
+            ),
+            Button.inline("+5", b"area:5"),
+            Button.inline("+10", b"area:10"),
+        ],
+        [
+            Button.inline("🚫 Любая", b"area:=0"),
+            Button.inline("40 м²", b"area:=40"),
+            Button.inline("50 м²", b"area:=50"),
+            Button.inline("70 м²", b"area:=70"),
         ],
         [Button.inline(BACK, b"m:filters")],
     ]

@@ -183,6 +183,7 @@ try:
                 facts = {
                     "is_rental_offer": True, "is_long_term": True,
                     "price_usd": l.price_usd, "bedrooms": l.bedrooms, "rooms": None,
+                    "area_m2": l.area_m2,
                     "district": __import__("districts").normalize(l.district),
                 }
                 ok, why = u.matches(sub, facts, "ssge")

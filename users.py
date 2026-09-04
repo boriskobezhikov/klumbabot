@@ -37,6 +37,12 @@ BUDGET_STEP = 50
 BUDGET_MIN = 100
 BUDGET_MAX = 5000
 
+# Нижние границы: 0 значит «не ограничено». Именно 0, а не None — так
+# арифметика в matches() и в кнопках обходится без проверок на None.
+MIN_PRICE_MAX = BUDGET_MAX
+AREA_STEP = 5
+AREA_MAX = 500
+
 SOURCE_TELEGRAM = "telegram"
 SOURCE_SSGE = "ssge"
 SOURCES = (SOURCE_TELEGRAM, SOURCE_SSGE)
@@ -51,6 +57,11 @@ class Subscriber:
     paused: bool = False
 
     budget_usd: int = 700
+    # 0 = без нижней границы. Отсекает подвалы и «цена по запросу за 1$».
+    min_price_usd: int = 0
+    # 0 = без ограничения. Площадь сайт отдаёт полем, из чатов её вычитывает
+    # Claude — и часто не находит; ненайденная площадь объявление не режет.
+    min_area_m2: int = 0
     bedrooms: list[int] = field(default_factory=lambda: [1])
     rooms: list[int] = field(default_factory=lambda: [1, 2])
     # Пустой список = любой район. Так новый подписчик по умолчанию видит всё.
@@ -73,11 +84,20 @@ class Subscriber:
         who = self.name or str(self.user_id)
         return f"{who} ({self.user_id})"
 
+    def price_range(self) -> str:
+        if self.min_price_usd:
+            return f"{self.min_price_usd}–{self.budget_usd}$"
+        return f"до {self.budget_usd}$"
+
+    def area_range(self) -> str:
+        return f"от {self.min_area_m2} м²" if self.min_area_m2 else "любая"
+
     def summary(self) -> str:
         d = ", ".join(self.district_list) if self.district_list else "любые"
         src = ", ".join(self.sources) if self.sources else "НЕТ (уведомлений не будет)"
         out = (
-            f"Бюджет: до {self.budget_usd}$\n"
+            f"Цена: {self.price_range()}\n"
+            f"Площадь: {self.area_range()}\n"
             f"Спален: {_nums(self.bedrooms)}\n"
             f"Комнат: {_nums(self.rooms)}\n"
             f"Районы: {d}\n"
@@ -95,6 +115,8 @@ class Subscriber:
             "status": self.status,
             "paused": self.paused,
             "budget_usd": self.budget_usd,
+            "min_price_usd": self.min_price_usd,
+            "min_area_m2": self.min_area_m2,
             "bedrooms": self.bedrooms,
             "rooms": self.rooms,
             "district_list": self.district_list,
@@ -111,6 +133,9 @@ class Subscriber:
             status=raw.get("status") or STATUS_PENDING,
             paused=bool(raw.get("paused", False)),
             budget_usd=int(raw.get("budget_usd", 700)),
+            # Старые конфиги этих полей не знают — отсутствие значит «не задано».
+            min_price_usd=int(raw.get("min_price_usd") or 0),
+            min_area_m2=int(raw.get("min_area_m2") or 0),
             bedrooms=[int(b) for b in raw.get("bedrooms") or [1]],
             rooms=[int(r) for r in raw.get("rooms") or [1, 2]],
             district_list=list(raw.get("district_list") or []),
@@ -144,6 +169,12 @@ def matches(sub: Subscriber, facts: dict, source: str) -> tuple[bool, str]:
     price = facts.get("price_usd")
     if isinstance(price, (int, float)) and price > sub.budget_usd:
         return False, f"{int(price)}$ дороже бюджета {sub.budget_usd}$"
+    if isinstance(price, (int, float)) and sub.min_price_usd and price < sub.min_price_usd:
+        return False, f"{int(price)}$ дешевле нижней границы {sub.min_price_usd}$"
+
+    area = facts.get("area_m2")
+    if isinstance(area, (int, float)) and sub.min_area_m2 and area < sub.min_area_m2:
+        return False, f"{int(area)} м² меньше {sub.min_area_m2} м²"
 
     beds = facts.get("bedrooms")
     if isinstance(beds, int) and sub.bedrooms:

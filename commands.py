@@ -235,7 +235,29 @@ async def _route(event, state: config.State, sub: Subscriber, action: str, arg: 
             sub.budget_usd = max(
                 users_mod.BUDGET_MIN, min(users_mod.BUDGET_MAX, sub.budget_usd + int(arg))
             )
+        # Верхнюю границу опустили ниже нижней — тянем нижнюю за собой, иначе
+        # фильтр стал бы пустым и человек молча перестал бы получать что-либо.
+        if sub.min_price_usd > sub.budget_usd:
+            sub.min_price_usd = sub.budget_usd
         await _menu(event, state, sub, "budget")
+    elif action == "minp":
+        if arg.startswith("="):
+            sub.min_price_usd = int(arg[1:])
+        elif int(arg) != 0:
+            sub.min_price_usd = max(
+                0, min(users_mod.MIN_PRICE_MAX, sub.min_price_usd + int(arg))
+            )
+        if sub.min_price_usd > sub.budget_usd:
+            sub.min_price_usd = sub.budget_usd
+        await _menu(event, state, sub, "budget")
+    elif action == "area":
+        if arg.startswith("="):
+            sub.min_area_m2 = int(arg[1:])
+        elif int(arg) != 0:
+            sub.min_area_m2 = max(
+                0, min(users_mod.AREA_MAX, sub.min_area_m2 + int(arg))
+            )
+        await _menu(event, state, sub, "area")
     elif action == "dist":
         if arg == "all":
             sub.district_list.clear()
@@ -341,10 +363,26 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
             buttons=kb.rooms_menu(sub),
         )
     elif screen == "budget":
+        low = (
+            f"Нижняя граница: {sub.min_price_usd}$ — дешевле не присылаю."
+            if sub.min_price_usd
+            else "Нижней границы нет: присылаю сколь угодно дешёвые."
+        )
         await event.edit(
-            f"💰 Максимум {sub.budget_usd}$ в месяц\n\n"
-            "Считается вся сумма: аренда плюс коммуналка, если она указана.",
+            f"💰 Цена: {sub.price_range()} в месяц\n\n"
+            f"Верхний ряд — нижняя граница, нижний — верхняя.\n{low}\n\n"
+            "Считается вся сумма: аренда плюс коммуналка, если она указана.\n"
+            "Объявления без цены проходят всегда.",
             buttons=kb.budget_menu(sub),
+        )
+    elif screen == "area":
+        await event.edit(
+            f"📐 Площадь: {sub.area_range()}\n\n"
+            "Меньше указанного не присылаю. Верхней границы нет — большая "
+            "квартира по твоей цене вряд ли помешает.\n\n"
+            "Объявления без указанной площади проходят всегда: на ss.ge она "
+            "есть почти везде, а в чатах её пишут далеко не всегда.",
+            buttons=kb.area_menu(sub),
         )
     elif screen == "dist":
         chosen = ", ".join(sub.district_list) if sub.district_list else "любые"

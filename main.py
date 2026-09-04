@@ -228,6 +228,24 @@ def max_active_budget() -> int:
     return max(budgets) if budgets else 0
 
 
+def min_active_price() -> int:
+    """
+    Самая низкая нижняя граница цены среди активных.
+
+    Дешевле неё объявление не нужно НИКОМУ, поэтому его можно отбросить до
+    вызова Claude. Если хоть у одного человека границы нет (0), отсев не
+    работает — и это правильно, ему такие объявления нужны.
+    """
+    subs = state.cfg.active()
+    return min((s.min_price_usd for s in subs), default=0) if subs else 0
+
+
+def min_active_area() -> int:
+    """То же для площади: меньше неё объявление не подходит никому."""
+    subs = state.cfg.active()
+    return min((s.min_area_m2 for s in subs), default=0) if subs else 0
+
+
 # ---------------------------------------------------------------------------
 # Дедупликация по тексту
 # ---------------------------------------------------------------------------
@@ -315,6 +333,24 @@ async def _handle_ssge_listing(
         log.info(
             "ss.ge #%s: %s$ дороже самого щедрого бюджета %s$ — пропуск",
             listing.id, listing.price_usd, ceiling,
+        )
+        return
+
+    floor = min_active_price()
+    if floor and listing.price_usd and listing.price_usd < floor:
+        state.stats.bump("ssge_price_cut")
+        log.info(
+            "ss.ge #%s: %s$ дешевле нижней границы всех подписчиков %s$ — пропуск",
+            listing.id, listing.price_usd, floor,
+        )
+        return
+
+    small = min_active_area()
+    if small and listing.area_m2 and listing.area_m2 < small:
+        state.stats.bump("ssge_area_cut")
+        log.info(
+            "ss.ge #%s: %sм² меньше нужного всем %sм² — пропуск",
+            listing.id, listing.area_m2, small,
         )
         return
 
