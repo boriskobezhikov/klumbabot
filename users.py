@@ -70,6 +70,12 @@ class Subscriber:
     # Свободный текст пожеланий. Проверяется отдельным вызовом Claude и только
     # для объявлений, уже прошедших структурные фильтры — см. main.personal_check.
     description: str = ""
+    # Строгий режим: объявление должно ДОКАЗАТЬ соответствие каждому заданному
+    # условию. Нестрогий трактует неизвестное в пользу объявления — так задумано
+    # изначально, чтобы не терять живое из-за отсутствия цифры в тексте, но
+    # именно от этого приходит вал: без цены, района и планировки объявление
+    # проходит все фильтры сразу. По умолчанию строгий.
+    strict: bool = True
 
     @property
     def is_owner(self) -> bool:
@@ -92,6 +98,9 @@ class Subscriber:
     def area_range(self) -> str:
         return f"от {self.min_area_m2} м²" if self.min_area_m2 else "любая"
 
+    def mode_name(self) -> str:
+        return "🎯 только подходящее" if self.strict else "📢 всё подряд"
+
     def summary(self) -> str:
         d = ", ".join(self.district_list) if self.district_list else "любые"
         src = ", ".join(self.sources) if self.sources else "НЕТ (уведомлений не будет)"
@@ -101,7 +110,8 @@ class Subscriber:
             f"Спален: {_nums(self.bedrooms)}\n"
             f"Комнат: {_nums(self.rooms)}\n"
             f"Районы: {d}\n"
-            f"Источники: {src}"
+            f"Источники: {src}\n"
+            f"Режим: {self.mode_name()}"
         )
         if self.description:
             out += f"\nПожелания: {self.description}"
@@ -122,6 +132,7 @@ class Subscriber:
             "district_list": self.district_list,
             "sources": self.sources,
             "description": self.description,
+            "strict": self.strict,
         }
 
     @classmethod
@@ -141,6 +152,10 @@ class Subscriber:
             district_list=list(raw.get("district_list") or []),
             sources=list(raw.get("sources") or SOURCES),
             description=raw.get("description") or "",
+            # Старые профили режима не знают. Ставим строгий: именно нестрогий
+            # и заваливал уведомлениями, и молча оставить его было бы худшим
+            # из вариантов — человек и обновился ровно чтобы это прекратить.
+            strict=bool(raw.get("strict", True)),
         )
 
 
@@ -155,11 +170,25 @@ def matches(sub: Subscriber, facts: dict, source: str) -> tuple[bool, str]:
     """
     Подходит ли объявление подписчику. Возвращает (да/нет, причина отказа).
 
-    Неизвестные факты трактуются в пользу объявления: лучше показать лишнее,
-    чем молча потерять подходящее из-за того, что в тексте не было цифры.
+    Разница режимов — только в том, что делать с НЕИЗВЕСТНЫМ фактом.
+
+    Строгий: объявление должно доказать соответствие каждому условию, которое
+    человек задал. Нет цены — мимо, даже если цена, может быть, и подошла бы.
+    Условия, которые не заданы (районы не выбраны, минимальной площади нет),
+    ничего не требуют.
+
+    Нестрогий: неизвестное трактуется в пользу объявления. Ничего живого не
+    теряется, но и вал приходит именно отсюда — объявление без единой цифры
+    проходит все фильтры разом.
     """
     if source not in sub.sources:
         return False, f"источник {source} отключён"
+
+    strict = sub.strict
+
+    # Сырая пересылка (Claude выключен): фактов нет вообще, проверять нечем.
+    if facts.get("unparsed") and strict:
+        return False, "не разобрано, а режим строгий"
 
     if not facts.get("is_rental_offer", True):
         return False, "не объявление о сдаче"
@@ -167,31 +196,48 @@ def matches(sub: Subscriber, facts: dict, source: str) -> tuple[bool, str]:
         return False, "не долгосрочная аренда"
 
     price = facts.get("price_usd")
-    if isinstance(price, (int, float)) and price > sub.budget_usd:
-        return False, f"{int(price)}$ дороже бюджета {sub.budget_usd}$"
-    if isinstance(price, (int, float)) and sub.min_price_usd and price < sub.min_price_usd:
-        return False, f"{int(price)}$ дешевле нижней границы {sub.min_price_usd}$"
+    if isinstance(price, (int, float)):
+        if price > sub.budget_usd:
+            return False, f"{int(price)}$ дороже бюджета {sub.budget_usd}$"
+        if sub.min_price_usd and price < sub.min_price_usd:
+            return False, f"{int(price)}$ дешевле нижней границы {sub.min_price_usd}$"
+    elif strict:
+        return False, "цена не указана"
 
     area = facts.get("area_m2")
-    if isinstance(area, (int, float)) and sub.min_area_m2 and area < sub.min_area_m2:
-        return False, f"{int(area)} м² меньше {sub.min_area_m2} м²"
+    if isinstance(area, (int, float)):
+        if sub.min_area_m2 and area < sub.min_area_m2:
+            return False, f"{int(area)} м² меньше {sub.min_area_m2} м²"
+    elif strict and sub.min_area_m2:
+        return False, "площадь не указана"
 
     beds = facts.get("bedrooms")
-    if isinstance(beds, int) and sub.bedrooms:
+    if isinstance(beds, int):
         # 3 в фильтре означает «три и больше»
-        wanted = max(sub.bedrooms)
-        if beds not in sub.bedrooms and not (wanted >= max(BEDROOM_CHOICES) and beds >= wanted):
+        wanted = max(sub.bedrooms) if sub.bedrooms else 0
+        if sub.bedrooms and beds not in sub.bedrooms and not (
+            wanted >= max(BEDROOM_CHOICES) and beds >= wanted
+        ):
             return False, f"спален {beds}, нужно {_nums(sub.bedrooms)}"
+    elif strict and sub.bedrooms:
+        return False, "спальни не указаны"
 
     rooms = facts.get("rooms")
-    if isinstance(rooms, int) and sub.rooms:
-        wanted = max(sub.rooms)
-        if rooms not in sub.rooms and not (wanted >= max(ROOM_CHOICES) and rooms >= wanted):
+    if isinstance(rooms, int):
+        wanted = max(sub.rooms) if sub.rooms else 0
+        if sub.rooms and rooms not in sub.rooms and not (
+            wanted >= max(ROOM_CHOICES) and rooms >= wanted
+        ):
             return False, f"комнат {rooms}, нужно {_nums(sub.rooms)}"
+    elif strict and sub.rooms:
+        return False, "число комнат не указано"
 
     if sub.district_list:
         canon = districts.normalize(facts.get("district"))
-        if canon is not None and canon not in sub.district_list:
+        if canon is None:
+            if strict:
+                return False, "район не указан"
+        elif canon not in sub.district_list:
             return False, f"район {canon} не в списке"
 
     return True, ""

@@ -317,6 +317,9 @@ async def _route(event, state: config.State, sub: Subscriber, action: str, arg: 
             else:
                 sub.district_list.append(name)
         await _menu(event, state, sub, "dist")
+    elif action == "mode":
+        sub.strict = arg == "strict"
+        await _menu(event, state, sub, "mode")
     elif action == "src":
         if arg in sub.sources:
             sub.sources.remove(arg)
@@ -453,6 +456,24 @@ async def _menu(event, state: config.State, sub: Subscriber, screen: str) -> Non
             "Если не выбран ни один — присылаю по всему Тбилиси.\n"
             "Объявления без указания района проходят всегда.",
             buttons=kb.districts_menu(sub),
+        )
+    elif screen == "mode":
+        await event.edit(
+            f"🎚 Режим: {sub.mode_name()}\n\n"
+            "Разница только в одном: что делать с объявлением, где нужного "
+            "тебе просто не написано.\n\n"
+            "🎯 Только подходящее\n"
+            "Объявление должно доказать, что подходит. Нет цены — мимо. Не "
+            "указан район, а ты выбрал районы — мимо. Приходит меньше, но "
+            "почти всё по делу.\n\n"
+            "📢 Всё подряд\n"
+            "Неизвестное трактуется в пользу объявления: не написана цена — "
+            "вдруг подойдёт, пришлю. Ничего живого не теряется, но именно "
+            "отсюда берётся вал: объявление без единой цифры проходит все "
+            "фильтры разом.\n\n"
+            "Условия, которые ты не задавал, в строгом режиме ничего не "
+            "требуют: районы не выбраны — район и не спрашивается.",
+            buttons=kb.mode_menu(sub),
         )
     elif screen == "desc":
         if sub.description:

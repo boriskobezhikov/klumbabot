@@ -46,6 +46,13 @@ USER_AGENT = (
 
 _NEXT_DATA = re.compile(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
 
+# Число комнат отдельным полем выдача не отдаёт, но оно всегда есть в
+# заголовке: «ქირავდება 2 ოთახიანი ბინა ...». Проверено на трёх выдачах по 16
+# объявлений: заголовок был у всех 48 и у всех совпал с запрошенным фильтром.
+# Берём отсюда, а не из параметра запроса, — параметру продвигаемые объявления
+# могли бы и не подчиниться, заголовок же описывает саму квартиру.
+_ROOMS_IN_TITLE = re.compile(r"(\d+)\s*ოთახიან")
+
 # Удобства с карточки объявления: поле в JSON -> как назвать его для Claude.
 # ВАЖНО: значение False здесь значит «автор не отметил галочку», а НЕ «этого
 # нет». Убедиться легко: у квартиры на 14-м этаже water/electricity/sewage
@@ -218,8 +225,11 @@ def parse(html: str) -> list[Listing]:
 def _to_listing(it: dict) -> Listing:
     addr = it.get("address") or {}
     price = it.get("price") or {}
+    title = (it.get("title") or "").strip()
+    m = _ROOMS_IN_TITLE.search(title)
 
     return Listing(
+        rooms=int(m.group(1)) if m else None,
         id=int(it["applicationId"]),
         price_usd=price.get("priceUsd") or None,
         bedrooms=it.get("numberOfBedrooms"),
@@ -227,7 +237,7 @@ def _to_listing(it: dict) -> Listing:
         city=addr.get("cityTitle"),
         district=addr.get("subdistrictTitle") or addr.get("districtTitle"),
         street=addr.get("streetTitle"),
-        title=(it.get("title") or "").strip(),
+        title=title,
         description=(it.get("description") or "").strip(),
         order_date=it.get("orderDate"),
         slug=it.get("detailUrl") or "",
@@ -266,7 +276,8 @@ def apply_detail(listing: Listing, ad: dict) -> None:
     listing.features = [
         label for key, label in FEATURE_LABELS.items() if ad.get(key) is True
     ]
-    listing.rooms = _int(ad.get("rooms"))
+    # Не затираем вычитанное из заголовка, если карточка комнат не назвала.
+    listing.rooms = _int(ad.get("rooms")) or listing.rooms
     listing.floor = str(ad["floor"]).strip() if ad.get("floor") else None
     listing.floors = str(ad["floors"]).strip() if ad.get("floors") else None
     listing.condition = (ad.get("state") or "").strip() or None

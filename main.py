@@ -332,6 +332,7 @@ async def handler(event) -> None:
             "is_rental_offer": True, "is_long_term": True,
             "price_usd": None, "bedrooms": None, "rooms": None,
             "area_m2": None, "district": None,
+            "unparsed": True,
             "summary": "⚠️ Не разобрано (Claude выключен):\n" + text[:600],
         }
         state.stats.bump("no_claude")

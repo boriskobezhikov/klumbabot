@@ -198,15 +198,21 @@ try:
     if cfg and cfg.active() and "ls" in dir() and ls:
         import users as u
 
+        import districts as districts_mod
+
+        # Факты строим ровно тем же способом, что и бот. Собирать их здесь
+        # руками уже приводило к расхождению: в самодельном наборе комнаты
+        # были захардкожены в None, и строгий режим «отсеивал» всё подряд —
+        # ошибки не было нигде, кроме этой проверки.
+        facts_list = []
+        for l in ls:
+            f = l.as_facts()
+            f["district"] = districts_mod.normalize(f["district"])
+            facts_list.append(f)
+
         for sub in cfg.active():
             passed, reasons = 0, {}
-            for l in ls:
-                facts = {
-                    "is_rental_offer": True, "is_long_term": True,
-                    "price_usd": l.price_usd, "bedrooms": l.bedrooms, "rooms": None,
-                    "area_m2": l.area_m2,
-                    "district": __import__("districts").normalize(l.district),
-                }
+            for facts in facts_list:
                 ok, why = u.matches(sub, facts, "ssge")
                 if ok:
                     passed += 1

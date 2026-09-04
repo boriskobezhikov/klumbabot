@@ -72,6 +72,9 @@ def stopall_menu(stopped: bool) -> list[list[Button]]:
 
 def filters_menu(sub: Subscriber) -> list[list[Button]]:
     return [
+        # Первой строкой: режим решает, как трактуются все остальные фильтры,
+        # и это первое, что ищут, когда приходит вал уведомлений.
+        [Button.inline(f"Режим: {sub.mode_name()}", b"m:mode")],
         [
             Button.inline(f"🛏 Спален: {_short(sub.bedrooms)}", b"m:bed"),
             Button.inline(f"🚪 Комнат: {_short(sub.rooms)}", b"m:room"),
@@ -88,6 +91,15 @@ def filters_menu(sub: Subscriber) -> list[list[Button]]:
             ),
         ],
         [Button.inline(BACK, b"m:main")],
+    ]
+
+
+def mode_menu(sub: Subscriber) -> list[list[Button]]:
+    """Две строки-переключателя: видно, что выбрано и что есть ещё."""
+    return [
+        [Button.inline(_toggle("🎯 Только подходящее", sub.strict), b"mode:strict")],
+        [Button.inline(_toggle("📢 Всё подряд", not sub.strict), b"mode:loose")],
+        [Button.inline(BACK, b"m:filters")],
     ]
 
 
