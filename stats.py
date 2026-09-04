@@ -37,6 +37,7 @@ COUNTERS = (
     ("claude_extract", "разборов в Claude"),
     ("claude_match", "личных проверок"),
     ("claude_failed", "ОШИБОК Claude"),
+    ("no_claude", "разобрано без Claude"),
     ("no_match", "никому не подошло"),
     ("notified", "уведомлений разослано"),
 )

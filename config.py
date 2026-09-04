@@ -78,6 +78,11 @@ class Config:
     # локальный флаг потерялся бы, а накопившееся за простой прилетело бы
     # пачкой. Снимается первым же проходом после возобновления.
     reprime_pending: bool = False
+    # Обращения к Claude. Выключение НЕ останавливает бота: ss.ge отдаёт цену,
+    # спальни, площадь и район структурными полями, и по ним фильтры работают
+    # ровно так же, только бесплатно. Теряются разбор сообщений из чатов и
+    # проверка свободных пожеланий — им факты взять неоткуда.
+    claude_enabled: bool = True
     chats: list[ChatRef] = field(default_factory=list)
     ssge: dict = field(default_factory=lambda: dict(DEFAULT_SSGE))
     subscribers: list[Subscriber] = field(default_factory=list)
@@ -142,6 +147,7 @@ class Config:
             "stopped": self.stopped,
             "stopped_at": self.stopped_at,
             "reprime_pending": self.reprime_pending,
+            "claude_enabled": self.claude_enabled,
             "chats": [c.__dict__ for c in self.chats],
             "ssge": self.ssge,
             "users": [s.to_dict() for s in self.subscribers],
@@ -162,6 +168,7 @@ class Config:
             stopped=bool(raw.get("stopped", False)),
             stopped_at=float(raw.get("stopped_at") or 0.0),
             reprime_pending=bool(raw.get("reprime_pending", False)),
+            claude_enabled=bool(raw.get("claude_enabled", True)),
             chats=[ChatRef(**c) for c in raw.get("chats") or []],
             ssge=ssge,
             subscribers=[Subscriber.from_dict(u) for u in raw.get("users") or []],

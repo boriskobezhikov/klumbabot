@@ -274,6 +274,12 @@ def admin_menu(cfg) -> list[list[Button]]:
             ),
         ],
         [
+            Button.inline(
+                _toggle("Claude (разбор объявлений)", cfg.claude_enabled),
+                b"adm:claude",
+            )
+        ],
+        [
             Button.inline("− мин", b"adm:int-5"),
             Button.inline(f"{s['poll_minutes']} мин", b"adm:noop"),
             Button.inline("+ мин", b"adm:int5"),

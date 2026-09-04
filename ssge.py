@@ -84,6 +84,13 @@ class SsgeError(Exception):
     """Сайт ответил не тем, чего мы ждём — обычно смена структуры страницы."""
 
 
+def _plural_beds(n: int) -> str:
+    """спальня / спальни / спален — сводка читается людьми, а не парсером."""
+    if 11 <= n % 100 <= 14:
+        return "спален"
+    return {1: "спальня", 2: "спальни", 3: "спальни", 4: "спальни"}.get(n % 10, "спален")
+
+
 @dataclass
 class Listing:
     id: int
@@ -116,6 +123,35 @@ class Listing:
     def location(self) -> str:
         parts = [p for p in (self.city, self.district, self.street) if p]
         return ", ".join(parts) or "не указан"
+
+    def as_facts(self) -> dict:
+        """
+        Факты без обращения к Claude — всё берётся прямо с сайта.
+
+        Долгосрочность не выводится из текста, а следует из адреса выдачи:
+        посуточная аренда на ss.ge живёт на отдельном пути и сюда не попадает.
+        Число комнат известно только после догрузки карточки, до неё — None,
+        и фильтр по комнатам такое объявление пропускает (неизвестное — в
+        пользу объявления, как и везде).
+        """
+        where = ", ".join(p for p in (self.district, self.street) if p) or "Тбилиси"
+        beds = (
+            f"{self.bedrooms} {_plural_beds(self.bedrooms)}"
+            if self.bedrooms is not None
+            else "спальни не указаны"
+        )
+        return {
+            "is_rental_offer": True,
+            "is_long_term": True,
+            "price_usd": self.price_usd,
+            "bedrooms": self.bedrooms,
+            "rooms": self.rooms,
+            "area_m2": self.area_m2,
+            "district": self.district,
+            "summary": f"{where}: {beds}"
+            + (f", {self.area_m2} м²" if self.area_m2 else "")
+            + (f", {self.condition.lower()}" if self.condition else ""),
+        }
 
     def as_prompt(self) -> str:
         """Карточка в том виде, в каком её читает Claude."""

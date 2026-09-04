@@ -180,7 +180,11 @@ async def fan_out(facts: dict, source: str, link: str | None, origin: str,
             continue
 
         note = ""
-        if sub.description and listing_text:
+        if sub.description and not state.cfg.claude_enabled:
+            # Пожелания — свободный текст, сверить их без модели нечем. Не
+            # проверяем, но и не делаем вид, что проверили.
+            note = "⚠️ не проверялись, Claude выключен"
+        elif sub.description and listing_text:
             ok, reason = await personal_check(sub, listing_text)
             if not ok:
                 log.info("  %s: НЕ подходит по пожеланиям — %s", sub.label(), reason)
@@ -315,9 +319,22 @@ async def handler(event) -> None:
 
     log.info("candidate #%s [%s]: %.70s", event.id, chat.label(), text.replace("\n", " "))
 
-    facts = await extract(text)
-    if not facts:
-        return
+    if state.cfg.claude_enabled:
+        facts = await extract(text)
+        if not facts:
+            return
+    else:
+        # Из сообщения в чате без Claude не достать ни цены, ни района —
+        # только сам факт, что оно похоже на объявление. Отдаём как есть,
+        # пометив, что не разобрано: молча проглотить было бы хуже, а тихо
+        # выдать за разобранное — совсем плохо.
+        facts = {
+            "is_rental_offer": True, "is_long_term": True,
+            "price_usd": None, "bedrooms": None, "rooms": None,
+            "area_m2": None, "district": None,
+            "summary": "⚠️ Не разобрано (Claude выключен):\n" + text[:600],
+        }
+        state.stats.bump("no_claude")
 
     link = chats_mod.message_link(chat, event.id)
     sent = await fan_out(
@@ -378,9 +395,19 @@ async def _handle_ssge_listing(
             listing.id, ", ".join(listing.features) or "ни одного не отмечено",
         )
 
-    facts = await extract(listing.as_prompt())
-    if not facts:
-        return
+    if state.cfg.claude_enabled:
+        facts = await extract(listing.as_prompt())
+        if not facts:
+            return
+    else:
+        # Без Claude ss.ge почти ничего не теряет: цену, спальни, площадь и
+        # район сайт отдаёт полями, а долгосрочность следует из адреса выдачи.
+        # Все фильтры работают как обычно, только бесплатно.
+        facts = listing.as_facts()
+        # Тот же шаг, что делает extract(): фильтр по районам сверяется с
+        # каноном, а сайт отдаёт «Диди Дигоми» или «ვაკე».
+        facts["district"] = districts.normalize(facts["district"])
+        state.stats.bump("no_claude")
 
     # Структурные поля сайта точнее, чем вычитанные из текста.
     if listing.price_usd:

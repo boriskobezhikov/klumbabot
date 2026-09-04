@@ -350,6 +350,10 @@ async def _route(event, state: config.State, sub: Subscriber, action: str, arg: 
             await event.answer("Только владелец.", alert=True)
             return
         changed = _admin_action(cfg, arg)
+        if arg == "claude" and not cfg.claude_enabled:
+            # Иначе последняя ошибка API так и висела бы в статистике, хотя
+            # обращений больше нет и жаловаться не на что.
+            state.last_claude_error = None
         await _menu(event, state, sub, "admin")
     elif action == "who":
         changed = False
@@ -382,6 +386,8 @@ def _admin_action(cfg: config.Config, arg: str) -> bool:
         s["enabled"] = not s["enabled"]
     elif arg == "prefilter":
         cfg.prefilter_enabled = not cfg.prefilter_enabled
+    elif arg == "claude":
+        cfg.claude_enabled = not cfg.claude_enabled
     elif arg.startswith("int"):
         s["poll_minutes"] = max(2, min(180, s["poll_minutes"] + int(arg[3:])))
     elif arg.startswith("pg"):
@@ -562,7 +568,8 @@ def _status_text(state: config.State, sub: Subscriber) -> str:
             f"Чаты: {chats}",
             f"ss.ge: {ssge} (rooms={cfg.ssge_rooms()})",
             f"Подписчиков активных: {len(cfg.active())}",
-            f"Вызовов Claude за 24ч: {calls}",
+            f"Вызовов Claude за 24ч: {calls}"
+            + ("" if cfg.claude_enabled else "  (Claude ВЫКЛЮЧЕН)"),
         ]
         if state.ssge_last_error:
             lines.append(f"⚠️ ss.ge: {state.ssge_last_error}")
@@ -570,8 +577,28 @@ def _status_text(state: config.State, sub: Subscriber) -> str:
 
 
 def _admin_text(cfg: config.Config) -> str:
+    if cfg.claude_enabled:
+        claude = (
+            "🤖 Claude включён — объявления разбираются, свободные пожелания "
+            "проверяются. Это единственная статья расходов.\n\n"
+            "Если выключить: ss.ge продолжит работать в полном объёме "
+            "(цену, спальни, площадь и район сайт отдаёт полями), из чатов "
+            "сообщения будут приходить сырыми, пожелания проверяться "
+            "перестанут."
+        )
+    else:
+        claude = (
+            "🤖 Claude ВЫКЛЮЧЕН — денег не тратится.\n\n"
+            "ss.ge работает как обычно: все фильтры по цене, спальням, "
+            "площади и району применяются, факты берутся с сайта.\n"
+            "Из чатов сообщения приходят сырыми, с пометкой «не разобрано»: "
+            "ни цены, ни района оттуда без модели не достать, поэтому "
+            "личные фильтры к ним не применяются.\n"
+            "Свободные пожелания не проверяются."
+        )
     return (
         "🛠 Общие настройки сбора\n\n"
+        f"{claude}\n\n"
         f"Предфильтр чатов собран из кнопок подписчиков:\n{cfg.bedroom_regex()}\n\n"
         f"ss.ge запрашивает комнаты: {cfg.ssge_rooms()}\n"
         "Эти два значения меняются сами, когда люди правят свои фильтры."

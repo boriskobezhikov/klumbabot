@@ -83,6 +83,10 @@ try:
         print(f"{WARN} опрос ss.ge выключен")
     print(f"{OK} чатов отслеживается: {len([c for c in cfg.chats if c.peer_id])}")
     print(f"{OK} предфильтр чатов: {'вкл' if cfg.prefilter_enabled else 'выкл'}")
+    if not cfg.claude_enabled:
+        print(f"{WARN} Claude ВЫКЛЮЧЕН — ss.ge работает по данным сайта,")
+        print("       сообщения из чатов приходят сырыми, пожелания не проверяются.")
+        print("       Включить: «🛠 Сбор» -> «Claude (разбор объявлений)»")
 except Exception as e:  # noqa: BLE001
     print(f"{BAD} не смог прочитать конфиг: {e}")
     fail(f"конфиг не читается: {e}")
@@ -91,9 +95,23 @@ except Exception as e:  # noqa: BLE001
 print("\n=== 3. Claude API (один пробный запрос) ===")
 model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 print(f"     модель: {model}")
+
+# Когда Claude выключен, проверить ключ всё равно полезно — иначе неоткуда
+# узнать, заработает ли бот после включения. Но неисправность в этом режиме
+# не мешает работе, поэтому в список проблем она не идёт.
+claude_off = cfg is not None and not cfg.claude_enabled
+if claude_off:
+    print(f"{WARN} Claude выключен в настройках; проверяю ключ на будущее.")
+
+
+def claude_problem(msg: str) -> None:
+    if not claude_off:
+        fail(msg)
+
+
 if not key:
     print(f"{BAD} ключа нет — запрос делать нечем")
-    fail("ANTHROPIC_API_KEY не задан, разбор объявлений невозможен")
+    claude_problem("ANTHROPIC_API_KEY не задан, разбор объявлений невозможен")
 try:
     from anthropic import Anthropic
 
@@ -138,7 +156,7 @@ except Exception as e:  # noqa: BLE001
     }.get(name)
     if hint:
         print(f"{WARN} {hint}")
-    fail(f"Claude недоступен ({name})")
+    claude_problem(f"Claude недоступен ({name})")
 
 print("\n=== 4. ss.ge (одна страница) ===")
 try:
